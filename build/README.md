@@ -118,8 +118,26 @@ else:
 
 ## 换装记录
 
-> 规则确认：功能里程碑次版本 +1；非里程碑小修动修订号（v1.6.1–v1.6.4 即此）。
+> 规则确认：功能里程碑次版本 +1；非里程碑小修动修订号。**M13 起版本双源同步纪律：
+> `src/version.py` APP_VERSION 与 `build/version_info.txt` 三处必须同轮升版，
+> tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
+> 校验，防漂移职责归看门）。**
 
+- **2026-09-15 v1.6.5 换装（M13 / des-5：`src/version.py` 单一版本源
+  APP_VERSION、设置面板 foot 行右端 `v{APP_VERSION} · by Jerry Wu` FAINT 档零增高、
+  同步看门入 test_settings）**：本轮曾于门禁步**正确中止一次**——168 行过时静态
+  pin `== "1.6.4"` 与升版冲突，orchestrator 定档修复（改 X.Y.Z 格式校验）后续跑。
+  双源同步：version.py="1.6.5" + version_info.txt 三处 1.6.5（fix-2 换装职责）。
+  门禁 9 套 **136/136 全绿**；重建 **10.7 MB / 14.1s**，PE 通过，属性 1.6.5
+  （UTF-8 复核）。**GBK console 复验**（v1.6.4 修复回归 + M13 后无 ↻ 类字符）：
+  `PYTHONIOENCODING=gbk --quit-after 40 --verbose` exit=0、stderr 0B，行含
+  `[ui] 刷新图标超采样光栅化×6：30.7ms` 与 `bailian=LOGIN_EXPIRED | codex=OK(剩 —
+  已用 18.0%) | 下轮 600s`（无 openai ✓），验毕 console 已删。守卫四件哈希一致、
+  openai 残留复净 ✓；windowed 常驻双进程落位 (2004,24) 330×248 responding=True；
+  HKCU Run **IDENTICAL**；**MpCmdRun 0 检出**；0 WER、cookie 基线不变。署名实证
+  `python tests\capture_m13.py` → **M13 CAPTURE: PASS**，
+  `local\m13_settings_footer.png`（39KB）右端 **v1.6.5 · by Jerry Wu** 上屏。
+  收口：git commit + tag v1.6.5，禁提交物扫描（auth.json/dpapi/local//dist/）为空。
 - **2026-09-15 v1.6.4 换装（M12h 热修：ui.py:605 日志文案 '↻'→「刷新图标」——
   销案 v1.6.3 轮定档的 console GBK 缺陷）**：门禁 9 套件 **136/136 全绿**；重建
   **10.7 MB / 12.5s**，PE 通过，属性 1.6.4。**修复上二进制实证**：console 变体在
