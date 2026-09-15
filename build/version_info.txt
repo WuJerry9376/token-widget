@@ -1,0 +1,30 @@
+# PyInstaller VERSIONINFO 资源（build.ps1 → spec 的 version= 指向本文件）。
+# 版本号规则见 build/README.md：每个功能里程碑次版本 +1（1.0 → 1.1 M6/M7 → …）。
+# 语言 0x0804 (zh-CN) / 码页 0x04b0 (1200, UTF-16)。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 6, 5, 0),
+    prodvers=(1, 6, 5, 0),
+    mask=0x3F,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,          # VFT_APP
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404b0', [
+        StringStruct('CompanyName', ''),
+        StringStruct('FileDescription', 'LLM API 额度桌面浮窗'),
+        StringStruct('FileVersion', '1.6.5'),
+        StringStruct('InternalName', 'TokenWidget'),
+        StringStruct('LegalCopyright', ''),
+        StringStruct('OriginalFilename', 'TokenWidget.exe'),
+        StringStruct('ProductName', 'Token 余量浮窗'),
+        StringStruct('ProductVersion', '1.6.5'),
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])]),
+  ]
+)

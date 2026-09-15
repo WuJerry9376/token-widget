@@ -1,0 +1,14 @@
+# 运行数据与凭据（绝不入库）
+local/
+dist/
+auth.json
+*.dpapi
+
+# 调试归档（原始矩阵输出可能含响应体敏感片段，只留在盘上）
+scripts/dbg_archive/
+
+# Python
+__pycache__/
+*.pyc
+build/_pyi/
+*.tmp
