@@ -2,7 +2,8 @@
 """token-widget M4 打包 spec：onefile + windowed（noconsole），name=TokenWidget。
 
 由 build/build.ps1 调用（不建议手动跑）。数据文件（local/config.json、state.json、
-cookie）**刻意不打包**：datas 为空，凭据/配置必须留在文件系统外部（见 build/README.md
+cookie）**刻意不打包**：datas 仅含 M21 foot 图标素材 assets/（只读 PNG，无用户数据），
+凭据/配置必须留在文件系统外部（见 build/README.md
 "部署目录结构"）。frozen 下 local/ 解析已由 orchestrator 修复（config/state/auth 三
 头部 sys.frozen→exe 同级），部署形态 = exe + 同级 local\\ 文件夹，M4 收口与 M5 换装
 均已实证。
@@ -12,6 +13,7 @@ import os
 # 本 spec 位于 <project>/build/，项目根为上一级
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 ICON = os.path.join(SPECPATH, "icon", "token-widget.ico")
+GH_ASSETS = os.path.join(ROOT, "assets")     # M21：foot GitHub 官方素材（烘焙 PNG×8）
 
 block_cipher = None
 
@@ -19,7 +21,9 @@ a = Analysis(
     [os.path.join(ROOT, "main.py")],
     pathex=[ROOT],
     binaries=[],
-    datas=[],                      # 绝不打包 local/、cookie、config
+    # datas 仍**绝不打包 local/、cookie、config**；M21 起仅追加 assets/ 图标素材
+    # （settings_panel.gh_asset_dir frozen→_MEIPASS/assets 解析，运行时只读）。
+    datas=[(GH_ASSETS, "assets")] if os.path.isdir(GH_ASSETS) else [],
     hiddenimports=[
         "tkinter",
         "tkinter.font",            # ui.py 使用 tkfont

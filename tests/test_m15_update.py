@@ -779,12 +779,15 @@ def u25_skipped_text_lock(app, root) -> str:
 
 
 def u26_gh_foot_icon(app, root) -> str:
-    """M18（u26 改造非删案例）：foot GitHub 图标渲染/隐藏零占位/点击 URL 打桩/失败橙字。
-
-    M17 星形按钮按用户改向删除：断言「☆ 给本项目加星」文本与 btn_star 控件不得回流；
-    图标挂在 foot 行 lbl_ver 左侧（side=right 后 pack 者居左），有 slug=显示、
-    空 slug=pack_forget 零占位；点击 webbrowser.open 打桩断 URL；失败/异常橙字。"""
+    """M21（u26 二次改造）：foot GitHub 图标=**官方 Invertocat 资产**渲染/隐藏零占位/
+    点击 URL 打桩/失败橙字。M18 自绘剪影（gen_gh_mark/_gh_shape_cov/_in_tri_uv）整删
+    禁回流；素材断言：_gh_imgs 双态键、PhotoImage 尺寸=当前档（宽≈1.032×高）。
+    M17 星形按钮文案不得回流；hover enter/leave 换图（faint↔soft 两张 PhotoImage）。"""
     import webbrowser as _wb
+    # 自绘退役守卫（M18 产物不得复活；函数与常量三件套）
+    for gone in ("gen_gh_mark", "_gh_shape_cov", "_in_tri_uv", "_GH_SS", "_GH_CACHE"):
+        assert not hasattr(settings_panel, gone), f"M18 自绘 {gone} 回流"
+    assert settings_panel.GH_TIERS == (16, 20, 24, 32)
     orig_open = _wb.open
     urls: list = []
     _wb.open = lambda u: (urls.append(u), True)[1]
@@ -797,11 +800,16 @@ def u26_gh_foot_icon(app, root) -> str:
         assert all("加星" not in t for t in texts), "M17 星按钮文案不得回流"
         assert all("给本项目" not in t for t in texts)
         assert not hasattr(panel, "btn_star"), "btn_star 控件必须已删除"
-        # 图标渲染态：已 pack、image 非空、尺寸≥12 物理px（foot 行高派生，DPI 自适应）
+        # M21 素材态：双态预载在位（faint/soft），尺寸=档表最近档
+        assert panel._gh_px in settings_panel.GH_TIERS, panel._gh_px
+        assert set(panel._gh_imgs) == {"faint", "soft"}, "两态 PhotoImage 预载"
+        im = panel._gh_imgs["faint"]
+        assert im.height() == panel._gh_px
+        assert abs(im.width() - panel._gh_px * 294 / 285) <= 1, "宽=等比(源 294×285)"
         assert panel.lbl_gh.winfo_manager() == "pack", "slug 有 → 图标 pack 在位"
         assert panel.lbl_gh.pack_info()["side"] == "right"
         assert str(panel.lbl_gh.cget("image")) != "", "PhotoImage 已挂上"
-        assert panel._gh_px >= 12 and panel.lbl_gh.cget("cursor") == "hand2"
+        assert panel.lbl_gh.cget("cursor") == "hand2"
         assert panel.lbl_gh.bind("<Button-1>"), "点击绑定已挂"
         # 位置：lbl_gh 在 lbl_ver 左侧（foot 行 right-pack 序 → icon 先落位）
         panel.update_idletasks()
@@ -819,14 +827,19 @@ def u26_gh_foot_icon(app, root) -> str:
         _wb.open = boom
         panel._up_open_repo()
         assert "未能拉起浏览器" in panel.lbl_up.cget("text")          # 异常同样兜底
-        # hover 两档：Enter→SOFT 图、Leave→FAINT 图（image 对象切换）
+        # hover 两态：Enter→soft 图、Leave→faint 图（对象名切换，非自绘重画）
         im0 = panel.lbl_gh.cget("image")
         panel._gh_enter()
-        assert panel.lbl_gh.cget("image") != im0, "hover 换 SOFT 档"
+        assert panel.lbl_gh.cget("image") != im0, "hover 换 soft 态素材"
+        assert str(panel.lbl_gh.cget("image")) == str(panel._gh_imgs["soft"]), "即预载那张"
         assert panel._gh_tipw is not None and "打开 GitHub 仓库页" in \
             panel._gh_tipw.winfo_children()[0].cget("text"), "tooltip 文案"
         panel._gh_leave()
-        assert panel.lbl_gh.cget("image") == im0, "离 hover 回 FAINT 档"
+        assert panel.lbl_gh.cget("image") == im0, "离 hover 回 faint 态素材"
+        # memo：同 (master,档) 复跑不重复加载（同 ui._ROT_IMGS 模式）
+        n_before = len(settings_panel._GH_IMGS)
+        settings_panel._gh_pair(panel._gh_px, panel)
+        assert len(settings_panel._GH_IMGS) == n_before, "命中 memo 零新档"
         panel.destroy()
         # 空 slug → 隐藏零占位（foot 布局回原样）+ 点击零唤起
         urls.clear()
@@ -840,7 +853,7 @@ def u26_gh_foot_icon(app, root) -> str:
         p2.destroy()
     finally:
         _wb.open = orig_open
-    return "foot 图标：渲染/hover 换档/tooltip/URL 断言/失败橙字/空 slug 零占位/星钮不回流"
+    return "官方素材双态/档表/等比宽/hover 换图/memo/URL 断言/失败橙字/零占位/自绘不回流"
 
 
 def u30_dialog_update_chain(app, root) -> str:

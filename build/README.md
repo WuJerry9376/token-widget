@@ -321,8 +321,9 @@ else:
 > `local\config.json` 的 `update.repo` 覆盖，构建侧代码不写死）。
 
 1. 更新 `build\version_info.txt` 与 `src\version.py` 的 APP_VERSION（两者必须一致，settings 门禁校验）
-2. `pwsh -File build\build.ps1` → 产出 `dist\TokenWidget.exe`
-3. 打 tag 并发布（repo 已定仓）：
+2. 图标资产：如 foot 配色/字号档位变动，重跑 `python tools\make_gh_assets.py` 再 build（源=AGENTS.md 共享资产规则所列 `GitHub-logo\GitHub_Invertocat_Black.png`，浅底选 Black/深底选 White；产物 `assets\gh_*_{16,20,24,32}.png` 随 spec datas 打进 exe）
+3. `pwsh -File build\build.ps1` → 产出 `dist\TokenWidget.exe`
+4. 打 tag 并发布（repo 已定仓）：
 
 ```powershell
 gh release create v<版本> dist\TokenWidget.exe --repo WuJerry9376/token-widget --generate-notes --latest

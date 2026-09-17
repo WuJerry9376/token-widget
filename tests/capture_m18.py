@@ -1,14 +1,17 @@
-"""M18 取证：设置页 foot 行 GitHub 图标 10× 放大截图（含 hover 态）。
+"""M21 取证：设置页 foot 行 GitHub 图标 10× 放大截图（含 hover 态）。
+（脚本自 M18 沿用；M21 素材改官方 Invertocat 资产后产物更名 m21_ghicon.png。）
 
 运行：`python tests\\capture_m18.py`（桌面会话）。数据真实性：
 - config 用真实 local\\config.json 的**只读副本**（update.repo=定仓 slug → 图标显示态）；
 - 零网络：updater.check 打桩为 skipped（避免开页触网）；webbrowser.open 打桩（不拉浏览器）；
 - 任何写路径（config/state/secret）重定向 temp，✕ 关闭即散。
 产物（local\\）：
-- m18_ghicon.png：foot 右缘区（图标+版本签名）10× 放大，**上下两段合成**——
-  上=常态（FAINT 墨档）、下=hover 态（SOFT 墨档，程序化触发 <Enter> 等价路径）。
+- m21_ghicon.png：foot 右缘区（图标+版本签名）10× 放大，**上下两段合成**——
+  上=常态（faint 素材=FAINT 色档）、下=hover 态（soft 素材=SOFT 色档，程序化触发
+  <Enter> 等价路径）。色彩层级与 M18 自绘版完全一致（烘焙色=FAINT/SOFT 原值）。
 自检：①图标 widget 在 lbl_ver 左侧且同行带；②常态段 FAINT 墨迹>15、hover 段
-SOFT 墨迹>15 且 FAINT 大减（档切换实证）；③图标宽=高=foot 行高派生（≥12px）。
+SOFT 墨迹>15 且 FAINT 大减（态切换实证）；③高=当前档 GH_TIERS 值、宽≈高×1.032
+（官方源图 294×285 等比，非正方的自绘残留）。
 """
 from __future__ import annotations
 
@@ -90,8 +93,9 @@ def main_run(tmp: Path) -> int:
         gx, gy = gh.winfo_rootx(), gh.winfo_rooty()
         gw, gh_h = gh.winfo_width(), gh.winfo_height()
         lx = lv.winfo_rootx()
-        # ③ 几何：方图、行高派生 ≥12px；① 图标在签名左侧、同一行带
-        ok &= gh_h >= 12 and gw == gh_h == panel._gh_px
+        # ③ 几何（M21 官方素材）：高=档表值、宽≈高×(294/285) 等比；① 图标在签名左侧、同行带
+        ok &= gh_h == panel._gh_px and panel._gh_px in settings_panel.GH_TIERS
+        ok &= abs(gw - gh_h * 294 / 285) <= 1
         ok &= gx < lx and abs((gy + gh_h / 2) - (lv.winfo_rooty() + lv.winfo_height() / 2)) < 6
         # 截取样区：图标+间距+版本签名整块（含左右上下文）
         sx0, sy0 = gx - 6, gy - 4
@@ -124,11 +128,11 @@ def main_run(tmp: Path) -> int:
         d = ImageDraw.Draw(comp)
         d.rectangle((1, 1, 6 + zs, 6 + zs), outline=(255, 0, 0))     # 红框标注图标位（上段=常态）
         d.rectangle((1, h * zs + 2, 6 + zs, h * zs + 2 + 6 + zs), outline=(255, 140, 0))
-        comp.save(LOCAL / "m18_ghicon.png")
-        print(f"saved local\\m18_ghicon.png（上=常态 FAINT，下=hover SOFT，10×；红/橙框=图标位）",
+        comp.save(LOCAL / "m21_ghicon.png")
+        print(f"saved local\\m21_ghicon.png（上=常态 faint 素材，下=hover soft 素材，10×；红/橙框=图标位）",
               flush=True)
         app.root.withdraw()
-        print("M18 CAPTURE:", "PASS" if ok else "FAIL", flush=True)
+        print("M21 CAPTURE:", "PASS" if ok else "FAIL", flush=True)
         return 0 if ok else 1
     finally:
         try:

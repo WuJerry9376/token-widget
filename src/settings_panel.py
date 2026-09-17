@@ -32,12 +32,19 @@
   「立即下载并更新/确认更新/取消/提权更新」组退役，能力迁入弹窗（点立即更新直接
   进下载，二次确认并入弹窗本身）；下载进度每 ≥512KB 节流刷 %，失败=橙字+重试/关闭，
   NEED_ELEVATION=「提权更新」钮照旧。
+- M21：foot 图标素材由自绘超采样剪影**改官方 Invertocat 资产**（用户指定）——
+  tools/make_gh_assets.py 从共享资产目录（AGENTS.md 规则所列，只读引用）取 Black
+  版，FAINT/SOFT 两态烘焙 PAPER 底出 4 档 DPI PNG（assets/gh_*_{16,20,24,32}.png，
+  高≈P(16)@S∈{1.0,1.25,1.5,2.0}）；运行时 tk.PhotoImage(file=) 按 S 选最近档、
+  (master,档) memo 双态预载（同 ui._ROT_IMGS 模式）。色彩层级/位置/间距/tooltip/
+  点击路由/slug 空隐藏零占位与 M18 全同；自绘 gen_gh_mark 整删禁回流。
 """
 from __future__ import annotations
 
 import os
 import queue
 import re
+import sys
 import textwrap
 import threading
 import time
@@ -217,87 +224,50 @@ def _split_proxy_echo(stored) -> tuple[str, str]:
     return (head, tail) if sep and tail.isdigit() else (rest, "")
 
 
-# ---------- M18：foot 行 GitHub 剪影图标（超采样光栅，同 ui._gen_rot_icons 技术栈） ----------
+# ---------- M21：foot 行 GitHub 图标=官方 Invertocat 资产（M18 自绘剪影退役） ----------
 #
-# Tk 8.6 PhotoImage 无 per-pixel alpha → 解析式子点覆盖判定 + 笔画 premultiply 到
-# 纸底 PAPER 后按花括号行 put；4×4 子点/像素抗锯齿。形似简化 Invertocat：圆头 +
-# 双耳三角 + 底三触手剪影（单位几何 0~1，输出 px 见调用方；~12-14 物理px @100%）。
-# 不放 ui.py（那是浮窗渲染域）；本模块自持，缓存按 (master档, px, 墨色)。
+# 素材=tools/make_gh_assets.py 离线烘焙的 8 张不透明 PNG（FAINT/SOFT 两态×四档，
+# PAPER 底，规避 Tk 无 per-pixel alpha 与低分辨率无平滑缩放）；运行时仅
+# tk.PhotoImage(file=...)，零处理零第三方。档表≈P(16)@S=1.0/1.25/1.5/2.0 取最近。
+# 缓存 (master,档)→{faint,soft}，同 ui.NoteApp._ROT_IMGS memo 模式。
 
-_GH_SS = 4                                            # 每像素 4×4 子点（与 ui._SS 同律）
-_GH_CACHE: dict[tuple, tk.PhotoImage] = {}
-
-
-def _gh_shape_cov(x: float, y: float) -> bool:
-    """单位盒 (0~1, y 向下) 任一笔画覆盖判定：圆头∪双耳底触手。
-
-    小尺寸可辨性优先：头圆收小抬高、耳做外尖细长三角（内缘埋进头圆、外缘成
-    轮廓尖角）、触手三桩独立可数（桩间留 0.02 缝隙、与头圆轻搭不断开）。"""
-    # 圆头（Octocat 大头短于宽，占中部）
-    if (x - 0.50) ** 2 + (y - 0.50) ** 2 <= 0.335 ** 2:
-        return True
-    # 双耳：沿 131°/49° 径向外刺的细尖（两底点埋进头圆，不再贴出直边）
-    ears = (((0.185, 0.145), (0.44, 0.30), (0.265, 0.50)),
-            ((0.815, 0.145), (0.56, 0.30), (0.735, 0.50)))
-    for v1, v2, v3 in ears:
-        if _in_tri_uv(x, y, v1, v2, v3):
-            return True
-    # 底触手：三圆桩（中间垂略长），桩间露纸缝、上缘搭进头圆下廓
-    for cx, cy, cr in ((0.32, 0.845, 0.07), (0.50, 0.90, 0.078),
-                       (0.68, 0.845, 0.07)):
-        if (x - cx) ** 2 + (y - cy) ** 2 <= cr * cr:
-            return True
-    return False
+GH_TIERS: tuple[int, ...] = (16, 20, 24, 32)          # 物理高 px（宽等比 1.032）
+_GH_IMGS: dict[tuple, dict[str, tk.PhotoImage]] = {}
 
 
-def _in_tri_uv(x: float, y: float, v1: tuple, v2: tuple, v3: tuple) -> bool:
-    """点 in 三角形（叉积同侧法，含边界；单位坐标版，ui._in_tri 同式）。"""
-    def cr(ax, ay, bx, by):
-        return ax * by - ay * bx
-    d1 = cr(v2[0] - v1[0], v2[1] - v1[1], x - v1[0], y - v1[1])
-    d2 = cr(v3[0] - v2[0], v3[1] - v2[1], x - v2[0], y - v2[1])
-    d3 = cr(v1[0] - v3[0], v1[1] - v3[1], x - v3[0], y - v3[1])
-    return (d1 <= 0 and d2 <= 0 and d3 <= 0) or (d1 >= 0 and d2 >= 0 and d3 >= 0)
+def gh_asset_dir() -> Path:
+    """assets 目录：frozen=PyInstaller 解包根（spec datas 打入 'assets'）；dev=项目根。"""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS",
+                            str(Path(sys.executable).resolve().parent)))
+        return base / "assets"
+    return Path(__file__).resolve().parent.parent / "assets"
 
 
-def gen_gh_mark(px: int, ink: str, bg: str = PAPER, master=None) -> tk.PhotoImage:
-    """GitHub 剪影单色图标：边长 px 物理像素，4×4 子点超采样覆盖 → put。
+def _gh_tier(S: float) -> int:
+    """当前 DPI 比例 → 四档最近者（S 坏型退 16 档）。"""
+    try:
+        s = float(S)
+    except (TypeError, ValueError):
+        return GH_TIERS[0]
+    return min(GH_TIERS, key=lambda px: abs(px / 16.0 - s))
 
-    ink/bg 为 #RRGGBB；同 (master,px,ink) 命中缓存复用（foot 常亮两档=两张）。
-    """
-    key = (id(master), int(px), ink.lower(), bg.lower())
-    hit = _GH_CACHE.get(key)
-    if hit is not None:
-        return hit
-    p_r, p_g, p_b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
-    i_r, i_g, i_b = (int(ink[i:i + 2], 16) for i in (1, 3, 5))
-    ss, n_sub = _GH_SS, _GH_SS * _GH_SS
-    sub = [(k + 0.5) / ss for k in range(ss)]
-    rows = []
-    for py in range(px):
-        line = []
-        for pxx in range(px):
-            hit_n = 0
-            for sy in sub:
-                uy = (py + sy) / px
-                for sx in sub:
-                    if _gh_shape_cov((pxx + sx) / px, uy):
-                        hit_n += 1
-            f = hit_n / n_sub
-            if f == 0.0:
-                line.append(f"#{p_r:02x}{p_g:02x}{p_b:02x}")
-            elif f == 1.0:
-                line.append(f"#{i_r:02x}{i_g:02x}{i_b:02x}")
-            else:
-                line.append("#%02x%02x%02x" % (
-                    int(p_r + (i_r - p_r) * f + 0.5),
-                    int(p_g + (i_g - p_g) * f + 0.5),
-                    int(p_b + (i_b - p_b) * f + 0.5)))
-        rows.append("{" + " ".join(line) + "}")
-    img = tk.PhotoImage(width=px, height=px, master=master)
-    img.put(" ".join(rows), to=(0, 0, px, px))
-    _GH_CACHE[key] = img
-    return img
+
+def _gh_pair(tier: int, master) -> dict[str, tk.PhotoImage]:
+    """双态预载 memo（"faint"=normal / "soft"=hover）；缺档抛 FileNotFoundError，
+    由面板侧兜底为图标隐藏——绝不让素材问题拖垮设置页。"""
+    key = (id(master), tier)
+    hit = _GH_IMGS.get(key)
+    if hit is None:
+        d = gh_asset_dir()
+        hit = {}
+        for state in ("faint", "soft"):
+            f = d / f"gh_{state}_{tier}.png"
+            if not f.is_file():
+                raise FileNotFoundError(str(f))
+            hit[state] = tk.PhotoImage(file=str(f), master=master)
+        _GH_IMGS[key] = hit
+    return hit
 
 
 class SettingsPanel(_Card):
@@ -549,12 +519,16 @@ class SettingsPanel(_Card):
         self.lbl_ver = tk.Label(foot, text=f"v{_version.APP_VERSION} · by Jerry Wu",
                                 font=app.f_note, **{**_tk_colors(), "fg": FAINT})
         self.lbl_ver.pack(side="right")
-        # ---- M18：版本签名左侧 GitHub 剪影图标（用户改向：M17 星形按钮→此入口） ----
-        # 几何：高=f_note 行高（~13px@100%，DPI 自适应），宽等高保比例；
+        # ---- M18/M21：版本签名左侧 GitHub 图标（官方 Invertocat 资产，用户改向：
+        #      M17 星形按钮→此入口；M21 自绘剪影→官方素材）----
+        # 几何：高=当前 S 最近档（16/20/24/32 物理px），宽素材等比（~1.03×）；
         # 与 lbl_ver 间距 ~6px；side=right 后 pack 者居左 → 「[icon] v… · by Jerry Wu」。
-        # slug 空 → 隐藏零占位（foot 布局回原样）；hover 墨档 FAINT→SOFT。
-        self._gh_px = max(12, int(round(app.f_note.metrics("linespace"))))
-        self._gh_imgs: dict[str, tk.PhotoImage] = {}
+        # slug 空或素材缺失 → 隐藏零占位（foot 布局回原样，绝不打断面板）；hover 态换图。
+        self._gh_px = _gh_tier(app.S)
+        try:
+            self._gh_imgs = _gh_pair(self._gh_px, self)
+        except Exception:                               # noqa: BLE001 缺素材→图标隐藏
+            self._gh_imgs = {}
         self._gh_packed = False
         self.lbl_gh = tk.Label(foot, bg=PAPER, cursor="hand2", bd=0,
                                highlightthickness=0)
@@ -738,14 +712,14 @@ class SettingsPanel(_Card):
         # M18：星形按钮已删（用户改向）——slug 空 → foot GitHub 图标隐藏零占位
         self._up_sync_gh_icon()
 
-    # ---- M18：foot GitHub 图标（渲染/隐藏/hover/tooltip/点击开仓页） ----
+    # ---- M18/M21：foot GitHub 图标（渲染/隐藏/hover 换态/tooltip/点击开仓页） ----
 
     def _up_sync_gh_icon(self) -> None:
         if not hasattr(self, "lbl_gh"):               # 更新组先于 foot 构建（构造序守卫）
             return
         slug = updater.parse_repo(_section(self.app, "update").get("repo"))
-        if slug:
-            self._gh_set(FAINT)
+        if slug and self._gh_imgs:                    # M21：素材缺失同 slug 空——隐藏零占位
+            self._gh_set("faint")
             if not self._gh_packed:
                 self.lbl_gh.pack(side="right", padx=(0, 6))
                 self._gh_packed = True
@@ -754,25 +728,22 @@ class SettingsPanel(_Card):
             self.lbl_gh.pack_forget()
             self._gh_packed = False
 
-    def _gh_img(self, ink: str) -> tk.PhotoImage:
-        img = self._gh_imgs.get(ink)
+    def _gh_set(self, state: str) -> None:
+        """"faint"=normal（FAINT 档，同 foot 文字层级）/ "soft"=hover（SOFT 一档加深）。"""
+        img = self._gh_imgs.get(state)
         if img is None:
-            img = gen_gh_mark(self._gh_px, ink, bg=PAPER, master=self)
-            self._gh_imgs[ink] = img                  # 持引用防 PhotoImage GC
-        return img
-
-    def _gh_set(self, ink: str) -> None:
+            return
         try:
-            self.lbl_gh.configure(image=self._gh_img(ink))
+            self.lbl_gh.configure(image=img)
         except tk.TclError:
             pass
 
     def _gh_enter(self, _e=None) -> None:
-        self._gh_set(SOFT)
+        self._gh_set("soft")
         self._gh_tip(True)
 
     def _gh_leave(self, _e=None) -> None:
-        self._gh_set(FAINT)
+        self._gh_set("faint")
         self._gh_tip(False)
 
     def _gh_tip(self, show: bool) -> None:
