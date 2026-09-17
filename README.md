@@ -60,7 +60,8 @@
 ## 更新（M15，GitHub Releases）
 
 - 设置页「更新」分组：☑自动更新（默认开；打开设置页时自动检查一次，6 小时内至多一次）、当前版本、「检查更新」手动按钮（无视频控）。
-- 更新源=GitHub Releases 最新 release 的 `TokenWidget.exe`；仓库写 `local\config.json` 的 `update.repo`（`owner/name`，空=未配置，零网络）。github api 默认直连（proxy_targets 不含 update），直连失败且代理开启时自动经代理重试一次。
+- 更新源=GitHub Releases 最新 release 的 `TokenWidget.exe`；仓库默认 `WuJerry9376/token-widget`（已内置配置 DEFAULTS，可在 `local\config.json` 的 `update.repo` 覆盖，置空=未配置零网络）。github api 默认直连（proxy_targets 不含 update），直连失败且代理开启时自动经代理重试一次。
+- **v1.7.0（当前发布版）**：首个自带更新能力的版本——设置页新增「更新」分组；更新走 GitHub Releases（`WuJerry9376/token-widget`）。
 - **安全设计：定时路径只读发现、绝不自动下载**——下载与替换只在用户点「立即下载并更新」并二次确认后发生；替换经一次性脚本在程序退出后完成（旧 exe 改名→新 exe 就位→自启→清理），`local\` 下凭据与设置零触碰。
 
 ## Codex / ChatGPT Plan 窗口限额（M10，**实验性**）

@@ -295,15 +295,16 @@ else:
 ## 发布新 release（M15 自动更新的服务器侧）
 
 > 客户端更新源 = GitHub Releases 最新 release 的 `TokenWidget.exe` 资源（settings_panel/updater）。
-> repo slug 配在客户端 `local\config.json` 的 `update.repo`（"owner/name"），构建侧不写死。
+> repo slug 默认 `WuJerry9376/token-widget`（public，config DEFAULTS 内置；客户端可在
+> `local\config.json` 的 `update.repo` 覆盖，构建侧代码不写死）。
 
 1. 更新 `build\version_info.txt` 与 `src\version.py` 的 APP_VERSION（两者必须一致，settings 门禁校验）
 2. `pwsh -File build\build.ps1` → 产出 `dist\TokenWidget.exe`
-3. 打 tag 并发布（一行模板，`<owner>/<repo>` 占位待填）：
+3. 打 tag 并发布（repo 已定仓）：
 
-`powershell
-gh release create v<版本> dist\TokenWidget.exe --repo <owner>/<repo> --generate-notes --latest
-`
+```powershell
+gh release create v<版本> dist\TokenWidget.exe --repo WuJerry9376/token-widget --generate-notes --latest
+```
 
 - 资源名必须保持 `TokenWidget.exe`（updater 按名匹配；多 .exe 且无主名时客户端宁缺勿错）
 - tag 用 `vX.Y.Z` 形态（客户端会去 v 前缀做三段数字比较，semver 非数字尾缀会被截断）

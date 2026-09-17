@@ -555,6 +555,11 @@ class SettingsPanel(_Card):
             text=f"  源 GitHub Releases · {slug}" if slug else "  源未配置（update.repo）")
 
     def _up_refresh(self, manual: bool) -> None:
+        # 定时路径（manual=False）只对接入 update 节的配置生效：真实 app 经
+        # load_config 的 DEFAULTS 合并必有该节；旧测试 fixture 手写 CFG 不含
+        # update 节 → 静默跳过（2f04147 定仓后防面板开测即打真实 GitHub）。
+        if not manual and not isinstance(self.app.cfg.get("update"), dict):
+            return
         sec = _section(self.app, "update")
         if not updater.parse_repo(sec.get("repo")):
             if manual:
