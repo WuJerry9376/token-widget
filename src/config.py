@@ -32,6 +32,9 @@ DEFAULTS: dict = {
     # M10：targets 可含 "codex"（chatgpt.com 亦需海外出口）。
     "network": {"proxy_enabled": False, "proxy_url": "",
                 "proxy_targets": ["opencode_go", "codex"]},
+    # M15：更新（GitHub Releases）。repo="owner/name"（空=未配置，UI 提示、零网络）；
+    # enabled=定时检查开关（**下载/替换仅用户明确动作**）；last_check=上次检查 epoch 秒。
+    "update": {"enabled": True, "repo": "", "last_check": 0},
 }
 
 

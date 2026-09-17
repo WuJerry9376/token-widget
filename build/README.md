@@ -291,3 +291,20 @@ else:
   存活；csv 无采样行系脚本自身缺陷：onefile 恒 2 进程使第 7 行
   `[math]::Round($p.WorkingSet64/1MB)` 抛 `op_Division`，与换装间隙无关（55s 间隙
   未落入任何 600s 采样点，EXITED/miss 行 = 0）。
+
+## 发布新 release（M15 自动更新的服务器侧）
+
+> 客户端更新源 = GitHub Releases 最新 release 的 `TokenWidget.exe` 资源（settings_panel/updater）。
+> repo slug 配在客户端 `local\config.json` 的 `update.repo`（"owner/name"），构建侧不写死。
+
+1. 更新 `build\version_info.txt` 与 `src\version.py` 的 APP_VERSION（两者必须一致，settings 门禁校验）
+2. `pwsh -File build\build.ps1` → 产出 `dist\TokenWidget.exe`
+3. 打 tag 并发布（一行模板，`<owner>/<repo>` 占位待填）：
+
+`powershell
+gh release create v<版本> dist\TokenWidget.exe --repo <owner>/<repo> --generate-notes --latest
+`
+
+- 资源名必须保持 `TokenWidget.exe`（updater 按名匹配；多 .exe 且无主名时客户端宁缺勿错）
+- tag 用 `vX.Y.Z` 形态（客户端会去 v 前缀做三段数字比较，semver 非数字尾缀会被截断）
+- 客户端 6h 频控 + 定时只读提示；下载/替换仅用户明确动作触发（见 README「更新」小节安全说明）

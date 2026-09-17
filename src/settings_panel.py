@@ -23,12 +23,15 @@
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
 from typing import Any
 
-from . import auth, autostart, config as config_mod, netconfig
+from . import auth, autostart, config as config_mod, netconfig, updater
+from .version import APP_VERSION
 from . import version as _version        # 属性引用（非 from import）：单一事实源可被测试钉验
 from .ui import (CRED_ERRORS, BADGE_BG, BADGE_EDGE, FAINT, INK, OK, ORANGE,
                  PAPER, PAPER_EDGE, SOFT, SOFT_TXT, RED, TRACK, TRACK_EDGE,
@@ -288,6 +291,56 @@ class SettingsPanel(_Card):
         self.lbl_net.pack(side="left")
         self._sync_probe_btn()
 
+        # ---- 更新（M15：GitHub Releases；检查可定时/手动，下载/替换仅用户明确动作） ----
+        tk.Label(self.body, text="更新", font=app.f_small_b,
+                 **{**_tk_colors(), "fg": SOFT_TXT}).pack(anchor="w", pady=(10, 2))
+        up = _section(app, "update")
+        self.var_up_auto = tk.BooleanVar(value=bool(up.get("enabled", True)))
+        tk.Checkbutton(self.body, text="自动更新（打开本页自动检查一次，6 小时内至多一次）",
+                       variable=self.var_up_auto, font=app.f_small,
+                       selectcolor=BADGE_BG, cursor="hand2", command=self._save_update_cfg,
+                       **_tk_colors()).pack(anchor="w")
+        rf = self.row("当前版本")
+        tk.Label(rf, text=f"v{APP_VERSION}", font=app.f_small,
+                 **{**_tk_colors(), "fg": FAINT}).pack(side="left")
+        self.lbl_up_repo = tk.Label(rf, text="", font=app.f_note,
+                                    **{**_tk_colors(), "fg": FAINT})
+        self.lbl_up_repo.pack(side="left")
+        rf = self.row("检查更新")
+        rf.pack_configure(pady=1)
+        self.btn_up_check = tk.Button(rf, text="检查更新", font=app.f_small,
+                                      cursor="hand2", bg=BADGE_BG, fg=INK,
+                                      activebackground=BADGE_EDGE, relief="flat", bd=0,
+                                      padx=12, pady=2, highlightthickness=1,
+                                      highlightbackground=BADGE_EDGE,
+                                      command=lambda: self._up_refresh(True))
+        self.btn_up_check.pack(side="left")
+        self.lbl_up = tk.Label(self.body, text="", font=app.f_small, wraplength=440,
+                               justify="left", **{**_tk_colors(), "fg": SOFT_TXT})
+        self.lbl_up.pack(anchor="w", pady=(2, 0))
+        self._up_btnf = tk.Frame(self.body, **_frame_kw())   # 下载/确认按钮行（按需 pack）
+        self.btn_up_dl = tk.Button(self._up_btnf, text="立即下载并更新",
+                                   font=app.f_small_b, cursor="hand2", bg=INK, fg=PAPER,
+                                   activebackground="#57503E", relief="flat", bd=0,
+                                   padx=14, pady=3, command=self._up_ask_confirm)
+        self.btn_up_go = tk.Button(self._up_btnf, text="确认更新",
+                                   font=app.f_small_b, cursor="hand2", bg=INK, fg=PAPER,
+                                   activebackground="#57503E", relief="flat", bd=0,
+                                   padx=14, pady=3, command=self._up_apply)
+        self.btn_up_no = tk.Button(self._up_btnf, text="取消", font=app.f_small,
+                                   cursor="hand2", bg=BADGE_BG, fg=SOFT_TXT,
+                                   activebackground=BADGE_EDGE, relief="flat", bd=0,
+                                   padx=14, pady=3, highlightthickness=1,
+                                   highlightbackground=BADGE_EDGE,
+                                   command=self._up_confirm_cancel)
+        self._up_info = None            # 本轮发现的 UpdateInfo（下载动作的唯一来源）
+        self._up_busy = False
+        self._up_q = queue.Queue()
+        self._up_sync_repo_label()
+        self.after(150, self._up_poll)
+        if self.var_up_auto.get():      # 定时路径：进页即查一次（updater 内 6h 频控）
+            self.after(400, lambda: self._up_refresh(False))
+
         # ---- 轮询周期 ----
         self.var_poll = tk.StringVar(value=str(int(cfg.get("poll_seconds", 300))))
         rf = self.row("轮询周期（秒）")
@@ -484,6 +537,160 @@ class SettingsPanel(_Card):
         else:
             word = "代理" if proxy else "直连"
             self.lbl_net.configure(text=f"  {word}通道正常（收到 HTTP {st}）", fg=OK)
+
+    # ---- M15：更新（后台线程 + queue/after 回投；下载/替换仅用户明确动作） ----
+
+    def _save_update_cfg(self, event=None) -> None:
+        sec = _section(self.app, "update")
+        sec["enabled"] = bool(self.var_up_auto.get())
+        self.app.cfg["update"] = sec
+        self.app.save_cfg()
+        self._up_sync_repo_label()
+        self._say("自动更新已" + ("开启" if sec["enabled"] else "关闭"))
+
+    def _up_sync_repo_label(self) -> None:
+        sec = _section(self.app, "update")
+        slug = updater.parse_repo(sec.get("repo"))
+        self.lbl_up_repo.configure(
+            text=f"  源 GitHub Releases · {slug}" if slug else "  源未配置（update.repo）")
+
+    def _up_refresh(self, manual: bool) -> None:
+        sec = _section(self.app, "update")
+        if not updater.parse_repo(sec.get("repo")):
+            if manual:
+                self.lbl_up.configure(
+                    text="未配置更新源：请在 local\\config.json 的 update.repo 填入 owner/name",
+                    fg=ORANGE)
+            return
+        if self._up_busy:
+            return
+        self._up_busy = True
+        self.btn_up_check.configure(state="disabled")
+        self.lbl_up.configure(text="正在检查更新…", fg=SOFT_TXT)
+        self._up_hide_buttons()
+        threading.Thread(target=self._up_worker_check, args=(manual,),
+                         daemon=True).start()
+
+    def _up_worker_check(self, manual: bool) -> None:
+        try:
+            res = updater.check(self.app.cfg, force=manual)
+            self._up_q.put(("check", res, manual))
+        except Exception as e:                        # noqa: BLE001 线程内兜底上抛
+            self._up_q.put(("check", updater.CheckResult(
+                err=f"检查异常：{type(e).__name__}"), manual))
+
+    def _up_poll(self) -> None:
+        if not self.alive():
+            return
+        try:
+            while True:
+                item = self._up_q.get_nowait()
+                if item[0] == "check":
+                    _, res, manual = item
+                    self._up_show_check(res, manual)
+                elif item[0] == "dl":
+                    self._up_show_dl(item[1])
+        except queue.Empty:
+            pass
+        self.after(150, self._up_poll)
+
+    def _up_show_check(self, res, manual: bool) -> None:
+        self._up_busy = False
+        self.btn_up_check.configure(state="normal")
+        if res.skipped:
+            self.lbl_up.configure(text="6 小时内已检查过（定时检查被频控；可手动「检查更新」）",
+                                  fg=SOFT_TXT)
+            return                                    # 频控不视为错误
+        if not res.ok:
+            self.lbl_up.configure(text=f"检查失败：{res.err[:90]}", fg=ORANGE)
+            self._save_last_check()
+            return
+        self._save_last_check()
+        self._up_info = res.info
+        cur_new = updater.is_newer(res.info.version, APP_VERSION)
+        if not cur_new:
+            self.lbl_up.configure(text=f"已是最新 v{APP_VERSION}（检查于 "
+                                       f"{time.strftime('%H:%M')}）", fg=OK)
+            self._up_hide_buttons()
+            return
+        notes = (res.info.notes or "").strip().replace("\r", " ").replace("\n", " ")
+        head = f"发现新版本 v{res.info.version}"
+        if notes:
+            head += f" · {notes[:60]}{'…' if len(notes) > 60 else ''}"
+        if manual:
+            self.lbl_up.configure(text=head + "：可立即下载并更新（将退出当前程序）",
+                                  fg=ORANGE)
+            if res.info.url:
+                self._up_show_download()
+            else:
+                self.lbl_up.configure(text=head + "：但该 release 无 TokenWidget.exe 资源",
+                                      fg=ORANGE)
+        else:
+            self.lbl_up.configure(text=head + "（定时只读提示，不自动下载）", fg=ORANGE)
+
+    def _save_last_check(self) -> None:
+        sec = _section(self.app, "update")
+        sec["last_check"] = int(time.time())
+        self.app.cfg["update"] = sec
+        self.app.save_cfg()
+
+    def _up_hide_buttons(self) -> None:
+        self._up_btnf.pack_forget()
+        for b in (self.btn_up_dl, self.btn_up_go, self.btn_up_no):
+            b.pack_forget()
+
+    def _up_show_download(self) -> None:
+        self._up_hide_buttons()
+        self.btn_up_dl.pack(side="left")
+        self._up_btnf.pack(anchor="w", pady=(4, 0))
+
+    def _up_ask_confirm(self) -> None:
+        """简版二次确认（_Card 内联语言，不弹系统对话框）。"""
+        if self._up_info is None or not self._up_info.url:
+            return
+        self.btn_up_dl.pack_forget()
+        self.btn_up_go.pack(side="left")
+        self.btn_up_no.pack(side="left", padx=(8, 0))
+        self.lbl_up.configure(text=f"将关闭并替换当前版本 → v{self._up_info.version}，"
+                                   "凭据与设置不受影响。继续？", fg=ORANGE)
+
+    def _up_confirm_cancel(self) -> None:
+        if self._up_info is not None and self._up_info.url:
+            self._up_show_download()                  # 取消确认 → 回退到「立即下载并更新」可重试
+        else:
+            self._up_hide_buttons()
+        if self._up_info is not None:
+            self.lbl_up.configure(text=f"发现新版本 v{self._up_info.version}"
+                                       "（已取消本次下载）", fg=SOFT_TXT)
+
+    def _up_apply(self) -> None:
+        if self._up_info is None or not self._up_info.url or self._up_busy:
+            return
+        self._up_busy = True
+        self._up_hide_buttons()
+        self.lbl_up.configure(text="正在下载更新包…（完成后自动替换并重启）", fg=SOFT_TXT)
+        threading.Thread(target=self._up_worker_apply, args=(self._up_info.url,),
+                         daemon=True).start()
+
+    def _up_worker_apply(self, url: str) -> None:
+        try:
+            path, err = updater.download_and_stage(url)
+            if err:
+                self._up_q.put(("dl", err))
+                return
+            err = updater.apply_update_and_restart(path)   # 成功=不返回（exit）
+            self._up_q.put(("dl", err or "更新脚本已就位但未能退出"))
+        except Exception as e:                            # noqa: BLE001
+            self._up_q.put(("dl", f"更新异常：{type(e).__name__}"))
+
+    def _up_show_dl(self, err: str) -> None:
+        self._up_busy = False
+        self.btn_up_check.configure(state="normal")
+        if err == "":
+            self.lbl_up.configure(text="✓ 更新脚本已接管，正在退出…", fg=OK)
+        else:
+            self.lbl_up.configure(text=f"更新未完成：{err[:90]}", fg=ORANGE)
+            self._up_show_download()
 
     def _save_poll(self, event=None) -> None:
         try:

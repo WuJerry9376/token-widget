@@ -57,6 +57,12 @@
 - 出口地区被上游封锁（Cloudflare 403 region）时会提示「切换海外节点」而非「密钥无效」（`REGION_BLOCKED` 已单独分类；「测试连通」同样橙字提示换节点）。
 - 地址非法（无端口/socks/畸形）时按直连处理并给橙色提示；代理改动即存，下一轮采集（含设置面板内"测试/验证"）立即生效。
 
+## 更新（M15，GitHub Releases）
+
+- 设置页「更新」分组：☑自动更新（默认开；打开设置页时自动检查一次，6 小时内至多一次）、当前版本、「检查更新」手动按钮（无视频控）。
+- 更新源=GitHub Releases 最新 release 的 `TokenWidget.exe`；仓库写 `local\config.json` 的 `update.repo`（`owner/name`，空=未配置，零网络）。github api 默认直连（proxy_targets 不含 update），直连失败且代理开启时自动经代理重试一次。
+- **安全设计：定时路径只读发现、绝不自动下载**——下载与替换只在用户点「立即下载并更新」并二次确认后发生；替换经一次性脚本在程序退出后完成（旧 exe 改名→新 exe 就位→自启→清理），`local\` 下凭据与设置零触碰。
+
 ## Codex / ChatGPT Plan 窗口限额（M10，**实验性**）
 
 - 第 4 家供应商「Codex（实验性）」：显示 ChatGPT 订阅的 Codex **5h / 周 窗口已用 % + 重置倒计时**（plan_type 做徽章；Pro 积分余额、窗口重置券计数进 tooltip）。
