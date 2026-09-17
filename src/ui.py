@@ -53,6 +53,7 @@ import ctypes.wintypes as wt
 import math
 import queue
 import re
+import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
@@ -60,7 +61,9 @@ from datetime import datetime, timezone
 from tkinter import font as tkfont
 
 from . import state as state_mod
+from . import updater
 from .sources.base import Usage, Window
+from .version import APP_VERSION
 
 # ---------- 便笺视觉常量（逻辑 px / 颜色；坐标 ×DPI 缩放，字号用负像素） ----------
 KEY = "#fe01fe"          # 透明色键：圆角之外透出桌面
@@ -543,6 +546,14 @@ class NoteApp:
         self._snap_job: object | None = None
         self._snap_anim: tuple[int, int, int, int, int] | None = None   # (sx,sy,tx,ty,帧号)
         self._snap_target: tuple[int, int] | None = None   # 吸附终值（动画/落盘对账用）
+
+        # ---- M16 自动更新触发：判定挂既有 5s/15s tick（不加常驻轮询），网络走
+        #      瞬时 daemon 线程（同 M15 面板形态，结果经 _drain 回投主线程） ----
+        self._upd_q: queue.Queue = queue.Queue()
+        self._upd_busy = False             # 单飞：一次只允许一个在途检查线程
+        self._upd_startup_done = False     # 进程内启动触发是否已消费
+        self._upd_new: updater.UpdateInfo | None = None   # 发现未处理新版（UpdateInfo）→ 亮橙点
+        self._upd_force_open = False       # 橙点点击 → 开设置并 force 检查一次
 
         self._make_menu()
         self._bind()
@@ -1046,6 +1057,7 @@ class NoteApp:
         except Exception as e:                    # 渲染异常不能让事件循环停摆（信息不含凭据）
             print(f"[ui] 渲染异常（已跳过本轮）：{type(e).__name__}: {str(e)[:160]}",
                   flush=True)
+        self._upd_drain()                       # M16：同循环顺带消费自动更新结果（无新轮询）
         self.root.after(250, self._drain)
 
     def _log_cycle(self, usages: list[Usage], meta: dict) -> None:
@@ -1070,7 +1082,72 @@ class NoteApp:
         except Exception as e:
             print(f"[ui] 定时重绘异常（已跳过）：{type(e).__name__}: {str(e)[:160]}",
                   flush=True)
+        try:
+            self._upd_tick()            # M16：自动更新触发点（首 tick≈5s=启动位；5 点后=每日位）
+        except Exception as e:
+            print(f"[ui] 更新触发异常（已跳过）：{type(e).__name__}", flush=True)
         self.root.after(15000, self._tick)
+
+    # ================= M16 自动更新触发 + 发现新版橙点 =================
+
+    def _upd_tick(self) -> None:
+        """15s tick 复用：判定并发起自动检查（enabled/slug/6h/日期戳全在 updater）。
+
+        仅起瞬时 daemon 线程做网络（主线程绝不打网，防 20s 冻结 UI）；结果由
+        _drain 回投。startup 触发每进程一次；daily 由 last_auto_date 防重。"""
+        if self._upd_busy or self._quitting:
+            return
+        if not isinstance(self.cfg.get("update"), dict):
+            return                                # M16：cfg 未接入 update 节（旧手写配置/测试
+            #                                       fixture）→ 触发点整体静默；真实 app 经
+            #                                       load_config 合并必有该节，功能不受影响
+        trig = updater.next_trigger(self.cfg, self._upd_startup_done)
+        if not trig:
+            return
+        if trig == "startup":
+            self._upd_startup_done = True
+        self._upd_busy = True
+        threading.Thread(target=self._upd_work, args=(trig,), daemon=True).start()
+
+    def _upd_work(self, trig: str) -> None:
+        try:
+            res = updater.check(self.cfg, force=False)
+        except Exception as e:                        # noqa: BLE001 线程兜底
+            res = updater.CheckResult(err=f"检查异常：{type(e).__name__}")
+        self._upd_q.put((trig, res))
+
+    def _upd_drain(self) -> None:
+        """_drain(250ms) 顺带消费更新结果：落戳/灭点/亮点（全在主线程）。"""
+        changed = False
+        try:
+            while True:
+                trig, res = self._upd_q.get_nowait()
+                self._upd_busy = False
+                if res.skipped:
+                    # 被 6h 频控：daily 仍记日期戳（结果本就新鲜，防此后每 15s 空转起线程）
+                    if trig == "daily":
+                        updater.stamp_auto_trigger(self.cfg, trig, attempted=False)
+                        self.save_cfg()
+                    continue
+                updater.stamp_auto_trigger(self.cfg, trig)
+                self.save_cfg()
+                if res.ok:
+                    if updater.is_newer(res.info.version, APP_VERSION):
+                        self._upd_new = res.info      # 有未发现新版 → 橙点亮
+                    else:
+                        self._upd_new = None          # 已是最新 → 灭
+                else:
+                    self._upd_new = None              # 网络失败不亮误导点
+                changed = True
+        except queue.Empty:
+            pass
+        if changed and not self._quitting:
+            self._render()                            # 点亮/灭点即时生效（不渲染会等下轮）
+
+    def _upd_open(self) -> None:
+        """橙点出口：打开设置页并置 force 标记（面板 build 时无视频控刷一次状态）。"""
+        self._upd_force_open = True
+        self.open_settings()
 
     # ================= 绘制原语 =================
 
@@ -1284,6 +1361,20 @@ class NoteApp:
         if not infos:
             c.create_text(m, P(y + 10), anchor="w", fill=SOFT, font=self.f_small,
                           text="没有已启用的供应商（见 config.enabled_providers）")
+
+        # ---- M16 发现新版橙点（≤15 行改动，逐行注释）----
+        # 仅"有未发现新版"时绘制；位于 foot 底部右缘、卷边三角左上（不触 M3c 顶边纯净判据）；
+        # 直径 3px（半径 1.5px×S），零行高增（不改 h 记账）；10px 见方点击热区。
+        if self._upd_new is not None:                      # 无发现 → 整段跳过（零占位）
+            ux, uy = w - fr - P(9), h - P(11)              # 卷边内侧、底沿暗线上方
+            ur = max(1.0, P(1.5))                          # 3px 直径（DPI 缩放后下限 2px）
+            c.create_oval(ux - ur, uy - ur, ux + ur, uy + ur,
+                          fill=ORANGE, outline="", tags=("updot",))  # 纯色点无描边
+            ud = self._p(8)                                # 点击/悬停容差（半宽 8px）
+            self.clicks.append((ux - ud, uy - ud, ux + ud, uy + ud,
+                                self._upd_open))           # 点击→设置页+force 检查
+            self.hits.append((ux - ud, uy - ud, ux + ud, uy + ud,
+                              {"tip": f"发现新版本 v{self._upd_new.version}，点击查看"}))
 
         # ---- 纸形蒙版裁切：圆角弧外的纹理/缝线/高光线全部补涂色键（M3c①） ----
         self._paper_clip(w, h, r)

@@ -11,6 +11,8 @@
 手动无视频控、空 slug 零网络、代理回落重试一次、download .part 原子 rename+长度校验、
 apply cmd 文本断言（路径引号/自删/不涉 local 凭据）、失败清理、设置分组渲染+勾选即存、
 手动→下载按钮→二次确认→取消、定时路径只读不自动下载、错误橙字脱敏。
+M16 增补：next_trigger 六路判定/stamp 日期戳/权限预检 probe/NEED_ELEVATION+提权 RunAs
+路径/FAILED.txt 消费/橙点亮点灭点+点击路由/开关与缺 update 节双静默/勾选文案纯「自动更新」。
 """
 from __future__ import annotations
 
@@ -46,7 +48,8 @@ CFG = {"poll_seconds": 300, "low_yellow_pct": 0.15, "low_red_pct": 0.05,
        "network": {"proxy_enabled": False, "proxy_url": "",
                    "proxy_targets": ["opencode_go", "codex"]},
        "update": {"enabled": True, "repo": "fake-owner/fake-repo",
-                  "last_check": int(_now) - 999999}}
+                  "last_check": int(_now) - 999999,
+                  "last_auto_date": time.strftime("%Y-%m-%d")}}   # 当日=已消费，tick 不野触发
 
 
 def cfg_with(**upd) -> dict:
@@ -293,7 +296,12 @@ def u14_cmd_text() -> str:
     for taboo in (".dpapi", "auth.json", "config.json", "state.json", "cookie"):
         assert taboo not in low, f"cmd 不得触碰 local 数据：{taboo}"
     assert ".old" in low and low.count('del /q') == 2, "仅删 .old 与 cmd 自身"
-    return "cmd 文本：引号/重试/自删/凭据零触碰"
+    # M16：失败兜底落档（两步各有 echo + rc，路径指向 FAILED.txt）
+    assert 'rename_old_failed rc=%errorlevel% tries=%TRIES%> "c:\\w\\local\\update\\failed.txt"'.lower() in low
+    assert "move_new_failed rc=%errorlevel%" in low
+    s2 = up.render_restart_cmd(r"n.exe", r"o.exe", r"c2\cmd.cmd", failed_path=r"x\f.txt")
+    assert 'x\\f.txt' in s2, "failed_path 显式覆盖生效"
+    return "cmd 文本：引号/重试/自删/凭据零触碰/FAILED 落档"
 
 
 def u15_apply_flow() -> str:
@@ -301,10 +309,11 @@ def u15_apply_flow() -> str:
     d.mkdir(parents=True, exist_ok=True)
     new = d / up.NEW_EXE_NAME
     new.write_bytes(b"MZ fake exe")
+    W = lambda p: True                                # M16：正常路径=预检通过注入
     spawned: list = []
     exited: list = []
     err = up.apply_update_and_restart(
-        new, current_exe=r"C:\fake\TokenWidget.exe",
+        new, current_exe=r"C:\fake\TokenWidget.exe", probe=W,
         spawn=lambda mode, exe, args: spawned.append((mode, exe, args)),
         exit_fn=lambda code: exited.append(code))
     assert err == "", err
@@ -312,24 +321,107 @@ def u15_apply_flow() -> str:
     assert spawned[0][2][-1] == str(d / up.CMD_NAME), "cmd 路径作为参数"
     text = (d / up.CMD_NAME).read_text(encoding="gbk")
     assert "TokenWidget.new.exe" in text and ".dpapi" not in text
+    assert "failed.txt" in text.lower(), "M16 失败落档行入 cmd"
     assert exited == [0], "成功后本进程退出"
     # 缺包 → 原因且不 spawn
     spawned.clear(); exited.clear()
-    err2 = up.apply_update_and_restart(d / "nope.exe",
+    err2 = up.apply_update_and_restart(d / "nope.exe", probe=W,
                                        spawn=lambda *a: spawned.append(a),
                                        exit_fn=lambda c: exited.append(c))
     assert "尚未下载" in err2 and not spawned and not exited
     # dev 模式（current=new 同名）拒绝
-    err3 = up.apply_update_and_restart(new, current_exe=new,
+    err3 = up.apply_update_and_restart(new, current_exe=new, probe=W,
                                        spawn=lambda *a: None, exit_fn=lambda c: None)
     assert "dev 模式" in err3
     # spawn 失败 → 清理 cmd、不 exit
     def boom(*a):
         raise OSError("spawn denied")
     err4 = up.apply_update_and_restart(new, current_exe=r"C:\fake\TokenWidget.exe",
-                                       spawn=boom, exit_fn=lambda c: exited.append(c))
+                                       probe=W, spawn=boom, exit_fn=lambda c: exited.append(c))
     assert "无法启动更新脚本" in err4 and not (d / up.CMD_NAME).exists() and not exited
     return "写cmd→DETACHED spawn→exit；缺包/dev同名/spawn败 三拒绝路径"
+
+
+def u16_next_trigger_matrix() -> str:
+    """三触发点判定（纯函数）：enabled 关/空 slug 零动作；startup 一次性；daily 5 点+日期戳。"""
+    today_noon = time.mktime(time.strptime("2026-09-20 12:00", "%Y-%m-%d %H:%M"))
+    early = time.mktime(time.strptime("2026-09-20 04:30", "%Y-%m-%d %H:%M"))
+    d = "2026-09-20"
+    assert up.next_trigger(cfg_with(enabled=False), False, today_noon) == ""   # 开关关
+    assert up.next_trigger(cfg_with(repo=""), False, today_noon) == ""          # slug 空
+    assert up.next_trigger(cfg_with(), False, today_noon) == "startup"
+    assert up.next_trigger(cfg_with(), True, early) == ""                       # 未到 5 点
+    assert up.next_trigger(cfg_with(), True, today_noon) == "daily"             # 5 点后今日未跑
+    assert up.next_trigger(cfg_with(last_auto_date=d), True, today_noon) == ""  # 日期戳防重
+    assert up.next_trigger(cfg_with(last_auto_date="2026-09-19"), True,
+                           today_noon) == "daily"                               # 跨日再触发
+    return "startup/daily/开关/slug/时点/日期戳 六路判定"
+
+
+def u17_stamp() -> str:
+    cfg = cfg_with(last_auto_date="")
+    up.stamp_auto_trigger(cfg, "startup", now=1000.4)
+    assert cfg["update"]["last_check"] == 1000
+    assert cfg["update"].get("last_auto_date", "") == ""            # startup 不记日戳
+    up.stamp_auto_trigger(cfg, "daily", now=2000.0)
+    assert cfg["update"]["last_check"] == 2000 and len(cfg["update"]["last_auto_date"]) == 10
+    c2 = cfg_with()
+    up.stamp_auto_trigger(c2, "daily", now=3000.0, attempted=False)  # skipped：只记日戳
+    assert c2["update"]["last_check"] == int(_now) - 999999 and c2["update"]["last_auto_date"]
+    return "startup 刷 last_check；daily 另记日期戳；skipped 仅日戳"
+
+
+def u18_probe() -> str:
+    ok_dir = tmp_root / "writable"
+    ok_dir.mkdir(exist_ok=True)
+    assert up.probe_replace_permission(ok_dir / "TokenWidget.exe") is True
+    assert not (ok_dir / ".write_test.tmp").exists(), "探测临时文件必删"
+    # Windows 目录 chmod 不可靠（readonly 属性不拦创建），用"父目录不存在"模拟不可写
+    ghost = tmp_root / "no_such_dir" / "TokenWidget.exe"
+    assert up.probe_replace_permission(ghost) is False
+    return "可写 True/不可写路径 False；.write_test.tmp 零残留"
+
+
+def u19_elevation() -> str:
+    d = config_mod.LOCAL_DIR / "update"
+    d.mkdir(parents=True, exist_ok=True)
+    new = d / up.NEW_EXE_NAME
+    new.write_bytes(b"MZ")
+    spawned: list = []
+    exited: list = []
+    NO = lambda p: False
+    err = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe", probe=NO,
+                                      spawn=lambda *a: spawned.append(a),
+                                      exit_fn=lambda c: exited.append(c))
+    assert err.startswith(up.NEED_ELEVATION) and "移动位置" in err, err
+    assert not spawned and not exited, "预检失败必须不退出、不 spawn"
+    # 提权重试：经 PowerShell Start-Process -Verb RunAs（一次 UAC）；cmd 落 TEMP
+    err2 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                       elevated=True, probe=NO,
+                                       spawn=lambda mode, exe, args: spawned.append((exe, args)),
+                                       exit_fn=lambda c: exited.append(c))
+    assert err2 == "" and len(spawned) == 1
+    exe, args = spawned[0]
+    assert "powershell" in exe.lower(), exe
+    joined = " ".join(args)
+    assert "-Verb RunAs" in joined and "Start-Process" in joined and up.CMD_NAME in joined
+    staged_cmd = Path(str(args[-1]))
+    assert (staged_cmd.parent / up.FAILED_NAME).name == up.FAILED_NAME
+    assert exited == [0]
+    # staging 与 TEMP 双不可写 → 指路移动位置（不 spawn 不退出；Windows chmod 不可靠，
+    # 用 _writable_dir 注入模拟）
+    orig_w = up._writable_dir
+    try:
+        up._writable_dir = lambda b: False
+        spawned.clear(); exited.clear()
+        err5 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                           elevated=True, probe=NO,
+                                           spawn=lambda *a: spawned.append(a),
+                                           exit_fn=lambda c: exited.append(c))
+        assert "可写目录" in err5 and not spawned and not exited, err5
+    finally:
+        up._writable_dir = orig_w
+    return "NEED_ELEVATION 不退出；提权=PS -Verb RunAs；双不可写指路移动"
 
 
 # ------------------------------------------------------- 面板（Tk）----
@@ -369,7 +461,9 @@ def u20_panel_render_and_toggle(app, root) -> str:
     panel.withdraw()
     texts = texts_of(panel, [])
     assert any("更新" == t.strip() for t in texts), "分组标题「更新」"
-    assert any(t.startswith("自动更新") for t in texts), "☑自动更新"
+    # M16 文案锁：勾选文字纯「自动更新」，旧括注已删（用户点名）
+    assert any(t == "自动更新" for t in texts), "勾选文案=自动更新（无括注）"
+    assert all("打开本页自动检查一次" not in t for t in texts), "旧括注文案不得回流"
     assert any(f"v{APP_VERSION}" in t for t in texts), "当前版本灰字"
     assert panel.btn_up_check.cget("text") == "检查更新"
     assert any("未配置" in t for t in texts), "空 repo → 源未配置提示（零网络）"
@@ -454,6 +548,97 @@ def u22_panel_auto_readonly_and_err(app, root) -> str:
     return "定时=只读提示无下载钮；错误橙字脱敏"
 
 
+def u23_panel_failed_note_and_force_open(app, root) -> str:
+    """M16：FAILED.txt 消费（橙字一行+读后即删）；橙点 force 路由（面板消费标记并强检一次）。"""
+    clear_cfg(repo="fake-owner/fake-repo", enabled=False)
+    d = config_mod.LOCAL_DIR / "update"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / up.FAILED_NAME).write_text("rename_old_failed rc=5 tries=10", encoding="gbk")
+    orig_check = up.check
+    calls: list = []
+    up.check = lambda cfg, force=False, **kw: (calls.append(force),
+                                               up.CheckResult(skipped=True))[1]
+    try:
+        panel = settings_panel.SettingsPanel(app)
+        panel.withdraw()
+        txt = panel.lbl_up.cget("text")
+        assert "上次自动更新未成功" in txt and "rename_old_failed" in txt, txt
+        assert not (d / up.FAILED_NAME).exists(), "读后即删（防每次开页重复提醒）"
+        panel.destroy()
+        # 橙点入口：force 标记 → 面板构建即消费 + 无视 enabled 关也刷一次
+        app._upd_force_open = True
+        p2 = settings_panel.SettingsPanel(app)
+        p2.withdraw()
+        assert app._upd_force_open is False, "force 标记面板构建时消费"
+        assert pump_until(root, lambda: any(c is True for c in calls)), "force=True 检查发生"
+        p2.destroy()
+    finally:
+        up.check = orig_check
+    return "FAILED 消费提醒 + 橙点 force 路由"
+
+
+def u24_tick_triggers_and_dot(app, root) -> str:
+    """M16：三触发点之 tick 接线——startup 一次性/daily 由日期戳消；发现新版亮橙点、
+    无新版灭点、点击路由开设置；enabled 关与 update 节缺失双静默。"""
+    orig_check = up.check
+    keep_cfg, keep = dict(app.cfg), (app._upd_startup_done, app._upd_new, app._upd_busy)
+    calls: list = []
+    up.check = lambda cfg, force=False, **kw: (calls.append(force), up.CheckResult(
+        ok=True, info=up.UpdateInfo(version="9.9.9", url="u")))[1]
+    try:
+        today = time.strftime("%Y-%m-%d")
+        app.cfg = cfg_with(last_check=0, last_auto_date=today)  # daily 今日已占 → 测 startup
+        app._upd_startup_done, app._upd_busy, app._upd_new = False, False, None
+        app._upd_tick()
+        assert app._upd_startup_done is True, "startup 触发即消费（每进程一次）"
+        app._upd_tick()
+        assert len(calls) == 1, "startup 已毕 + daily 日期戳占 → 二次 tick 零动作"
+        assert pump_until(root, lambda: app._upd_new is not None), "回投后亮点"
+        assert calls[0] is False, "定时触发用 force=False"
+        assert app.canvas.find_withtag("updot"), "橙点画布项存在"
+        saved = json.loads((tmp_root / "config.json").read_text(encoding="utf-8"))
+        assert saved["update"]["last_check"] > 0, "stamp 落盘"
+        tip = next(z[4]["tip"] for z in app.hits
+                   if isinstance(z[4], dict) and "新版本" in z[4].get("tip", ""))
+        assert "v9.9.9" in tip, tip
+        cb = next(z[4] for z in app.clicks
+                  if getattr(z[4], "__name__", "") == "_upd_open")
+        cb()                                        # 点击橙点 → 设置页（force 消费在 u23 已验）
+        assert pump_until(root, lambda: len(calls) >= 2), "force 检查发出"
+        if app._settings is not None and app._settings.alive():
+            app._settings.destroy()
+        # 已是最新 → 灭点（橙点此前亮着：9.9.9 发现态）
+        assert app._upd_new is not None and app.canvas.find_withtag("updot"), "前置：点仍亮"
+        up.check = lambda cfg, force=False, **kw: up.CheckResult(
+            ok=True, info=up.UpdateInfo(version=APP_VERSION, url="u"))
+        app.cfg = cfg_with(last_check=0, last_auto_date="")
+        app._upd_startup_done, app._upd_busy = False, False
+        app._upd_tick()
+        assert pump_until(root, lambda: app._upd_new is None
+                          and not app.canvas.find_withtag("updot")), "等版本 → 点灭"
+        # enabled 关 → 零动作
+        calls2: list = []
+        up.check = lambda cfg, force=False, **kw: (calls2.append(1),
+                                                   up.CheckResult(skipped=True))[1]
+        app.cfg = cfg_with(enabled=False)
+        app._upd_startup_done, app._upd_busy = False, False
+        app._upd_tick()
+        assert not calls2 and app._upd_busy is False, "自动更新关 → 触发点零动作"
+        # cfg 无 update 节（旧手写配置）→ 整体静默
+        app.cfg = {k: v for k, v in cfg_with().items() if k != "update"}
+        app._upd_startup_done, app._upd_busy = False, False
+        app._upd_tick()
+        assert not calls2 and app._upd_busy is False, "无 update 节配置 → tick 触发点静默"
+    finally:
+        up.check = orig_check
+        app.cfg = keep_cfg
+        app._upd_startup_done, app._upd_new, app._upd_busy = keep
+        if app._settings is not None and app._settings.alive():
+            app._settings.destroy()
+        app._render()
+    return "startup 一次性/亮灭点/点击路由/开关与缺节双静默"
+
+
 def clear_cfg(**upd) -> None:
     cfg = {**CFG, "update": {**CFG["update"], **upd}}
     (tmp_root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -486,12 +671,18 @@ CASES_PURE = [
     ("download_no_cl_crash", u13_download_no_cl_and_crash),
     ("cmd_text", u14_cmd_text),
     ("apply_flow", u15_apply_flow),
+    ("next_trigger_matrix", u16_next_trigger_matrix),
+    ("stamp", u17_stamp),
+    ("probe", u18_probe),
+    ("elevation", u19_elevation),
 ]
 
 CASES_TK = [
     ("panel_render_toggle", u20_panel_render_and_toggle),
     ("panel_manual_flow", u21_panel_manual_flow),
     ("panel_auto_readonly_err", u22_panel_auto_readonly_and_err),
+    ("panel_failed_forceopen", u23_panel_failed_note_and_force_open),
+    ("tick_triggers_dot", u24_tick_triggers_and_dot),
 ]
 
 
@@ -530,6 +721,7 @@ def run(tmp: Path) -> int:
     app = NoteApp(root, json.loads((tmp / "config.json").read_text(encoding="utf-8")),
                   sched, state=dict(DEFAULTS))
     app_holder["app"] = app
+    app._upd_startup_done = True       # M16：野跑防御——启动触发由 u24 显式复位后专测
     root.withdraw()
     try:
         for name, fn in CASES_PURE:

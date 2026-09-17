@@ -296,7 +296,7 @@ class SettingsPanel(_Card):
                  **{**_tk_colors(), "fg": SOFT_TXT}).pack(anchor="w", pady=(10, 2))
         up = _section(app, "update")
         self.var_up_auto = tk.BooleanVar(value=bool(up.get("enabled", True)))
-        tk.Checkbutton(self.body, text="自动更新（打开本页自动检查一次，6 小时内至多一次）",
+        tk.Checkbutton(self.body, text="自动更新",
                        variable=self.var_up_auto, font=app.f_small,
                        selectcolor=BADGE_BG, cursor="hand2", command=self._save_update_cfg,
                        **_tk_colors()).pack(anchor="w")
@@ -333,12 +333,32 @@ class SettingsPanel(_Card):
                                    padx=14, pady=3, highlightthickness=1,
                                    highlightbackground=BADGE_EDGE,
                                    command=self._up_confirm_cancel)
+        # M16：目录无写权限时的「提权更新」（一次 UAC，借 PowerShell -Verb RunAs）
+        self.btn_up_elev = tk.Button(self._up_btnf, text="提权更新", font=app.f_small_b,
+                                     cursor="hand2", bg=INK, fg=PAPER,
+                                     activebackground="#57503E", relief="flat", bd=0,
+                                     padx=14, pady=3, command=self._up_elevate)
         self._up_info = None            # 本轮发现的 UpdateInfo（下载动作的唯一来源）
+        self._up_staged = None          # M16：已下载的 new exe 路径（提权重试免二次下载）
         self._up_busy = False
         self._up_q = queue.Queue()
         self._up_sync_repo_label()
+        # M16：消费 cmd 失败落档（上次自动更新未完成的橙字一行，读后即删防重复提醒）
+        fp = updater.update_dir() / updater.FAILED_NAME
+        try:
+            if fp.exists():
+                reason = fp.read_text(encoding="gbk", errors="replace").strip()[:120]
+                fp.unlink()
+                self.lbl_up.configure(text=f"上次自动更新未成功：{reason}", fg=ORANGE)
+        except OSError:
+            pass
         self.after(150, self._up_poll)
-        if self.var_up_auto.get():      # 定时路径：进页即查一次（updater 内 6h 频控）
+        # 定时路径：进页即查（6h 频控）；M16 橙点入口置 force 时无视频控刷一次
+        force_open = bool(getattr(app, "_upd_force_open", False))
+        app._upd_force_open = False
+        if force_open:
+            self.after(120, lambda: self._up_refresh(True))
+        elif self.var_up_auto.get():
             self.after(400, lambda: self._up_refresh(False))
 
         # ---- 轮询周期 ----
@@ -613,6 +633,9 @@ class SettingsPanel(_Card):
         self._save_last_check()
         self._up_info = res.info
         cur_new = updater.is_newer(res.info.version, APP_VERSION)
+        # M16：与主窗橙点同步（发现新版→保持亮；已最新→灭）
+        if hasattr(self.app, "_upd_new"):
+            self.app._upd_new = res.info if cur_new else None
         if not cur_new:
             self.lbl_up.configure(text=f"已是最新 v{APP_VERSION}（检查于 "
                                        f"{time.strftime('%H:%M')}）", fg=OK)
@@ -641,7 +664,7 @@ class SettingsPanel(_Card):
 
     def _up_hide_buttons(self) -> None:
         self._up_btnf.pack_forget()
-        for b in (self.btn_up_dl, self.btn_up_go, self.btn_up_no):
+        for b in (self.btn_up_dl, self.btn_up_go, self.btn_up_no, self.btn_up_elev):
             b.pack_forget()
 
     def _up_show_download(self) -> None:
@@ -683,19 +706,39 @@ class SettingsPanel(_Card):
             if err:
                 self._up_q.put(("dl", err))
                 return
+            self._up_staged = path                     # M16：暂存供「提权更新」免重下
             err = updater.apply_update_and_restart(path)   # 成功=不返回（exit）
             self._up_q.put(("dl", err or "更新脚本已就位但未能退出"))
         except Exception as e:                            # noqa: BLE001
             self._up_q.put(("dl", f"更新异常：{type(e).__name__}"))
+
+    def _up_elevate(self) -> None:
+        """M16：目录无写权限时的一次性提权重试（PowerShell -Verb RunAs，单次 UAC）。"""
+        if self._up_staged is None or self._up_busy:
+            return
+        self._up_busy = True
+        self._up_hide_buttons()
+        self.lbl_up.configure(text="已在提权请求中：确认 UAC 后自动完成替换…", fg=SOFT_TXT)
+        staged = self._up_staged
+        threading.Thread(target=lambda: self._up_q.put(
+            ("dl", updater.apply_update_and_restart(staged, elevated=True)
+                   or "更新脚本已就位但未能退出")), daemon=True).start()
 
     def _up_show_dl(self, err: str) -> None:
         self._up_busy = False
         self.btn_up_check.configure(state="normal")
         if err == "":
             self.lbl_up.configure(text="✓ 更新脚本已接管，正在退出…", fg=OK)
-        else:
-            self.lbl_up.configure(text=f"更新未完成：{err[:90]}", fg=ORANGE)
-            self._up_show_download()
+            return
+        if err.startswith(updater.NEED_ELEVATION):        # M16：预检失败→不退出，给出路
+            self.lbl_up.configure(
+                text=err[len(updater.NEED_ELEVATION):] + "。更新包已就绪，可点击下方「提权更新」",
+                fg=ORANGE)
+            self.btn_up_elev.pack(side="left")
+            self._up_btnf.pack(anchor="w", pady=(4, 0))
+            return
+        self.lbl_up.configure(text=f"更新未完成：{err[:90]}", fg=ORANGE)
+        self._up_show_download()
 
     def _save_poll(self, event=None) -> None:
         try:

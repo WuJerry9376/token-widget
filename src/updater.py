@@ -42,6 +42,9 @@ ASSET_NAME = "TokenWidget.exe"                      # 主匹配资源名（大�
 _UPDATE_REL = Path("update")
 NEW_EXE_NAME = "TokenWidget.new.exe"
 CMD_NAME = "restart_update.cmd"
+FAILED_NAME = "FAILED.txt"                          # M16：cmd 失败兜底落档
+DAILY_START_HOUR = 5                                # M16：每日 5 点后首帧触发窗
+NEED_ELEVATION = "NEED_ELEVATION:"                  # 前缀标记（面板据此出「提权更新」钮）
 
 
 @dataclass
@@ -225,6 +228,50 @@ def mark_checked(cfg: dict, now: float | None = None) -> None:
     cfg["update"] = sec
 
 
+# ---------------- M16：自动检查触发点判定（纯函数，ui 15s tick 复用） ----------------
+
+def _local_dt(now: float | None):
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(time.time() if now is None else now)
+
+
+def next_trigger(cfg: dict, startup_done: bool, now: float | None = None) -> str:
+    """返回 "" | "startup" | "daily"（只判定不改 cfg；执行与落戳由调用方做）。
+
+    - enabled 关 / slug 空 → 恒 ""（零动作）；
+    - 启动首触发：进程内 startup_done=False 即 "startup"（挂现有 5s 首 tick=
+      「首帧渲染后延迟数秒」；6h 频控在 check() 内消化，与开设置页同日自然合并）；
+    - 每日 5 点后：本地钟点 ≥5 且 last_auto_date≠今日 → "daily"（睡眠错过由
+      下一 tick 补跑；无论实际执行还是被频控 skipped，"daily" 发起一次即由
+      stamp_auto_trigger 记日期戳防每 15s 重发）。
+    """
+    sec = _section(cfg)
+    if not bool(sec.get("enabled", True)) or not parse_repo(sec.get("repo")):
+        return ""
+    if not startup_done:
+        return "startup"
+    dt = _local_dt(now)
+    if dt.hour < DAILY_START_HOUR:
+        return ""
+    if str(sec.get("last_auto_date") or "") == dt.strftime("%Y-%m-%d"):
+        return ""
+    return "daily"
+
+
+def stamp_auto_trigger(cfg: dict, trig: str, now: float | None = None,
+                       attempted: bool = True) -> None:
+    """发起一次自动检查后的落戳：attempted（实际打了网络，含 HTTP/解析错）刷 last_check；
+    daily 无论实际执行还是被频控 skipped 均记日期戳（防 5 点后每 15s 反复起线程）。
+    """
+    t = time.time() if now is None else now
+    if attempted:
+        mark_checked(cfg, now=t)
+    if trig == "daily":
+        sec = _section(cfg)
+        sec["last_auto_date"] = _local_dt(t).strftime("%Y-%m-%d")
+        cfg["update"] = sec
+
+
 def download_and_stage(url: str, dest_dir: Path | str | None = None,
                        opener=None, req_open=None, chunk: int = 65536
                        ) -> tuple[Path | None, str]:
@@ -279,17 +326,41 @@ def download_and_stage(url: str, dest_dir: Path | str | None = None,
             f"下载失败：{str(getattr(e, 'reason', e))[:120]}")
 
 
+def probe_replace_permission(exe_path: Path | str | None = None) -> bool:
+    """exe 所在目录可替换预检：试建 .write_test.tmp → 立即删（同目录写权限探测）。
+
+    永不抛：任何 OSError/PermissionError → False。只碰临时名，不触碰既有文件。
+    """
+    target = Path(exe_path) if exe_path is not None else Path(sys.executable)
+    probe = target.parent / ".write_test.tmp"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        try:
+            probe.unlink(missing_ok=True)             # 半截产物兜底清理
+        except OSError:
+            pass
+        return False
+
+
 def render_restart_cmd(new_exe: Path | str, old_exe: Path | str,
-                       cmd_path: Path | str) -> str:
+                       cmd_path: Path | str,
+                       failed_path: Path | str | None = None) -> str:
     """一次性替换脚本（纯函数，测试对文本）。
 
     时序：ping 等本进程退出 → 旧 exe 改名 .old（占用则重试至多 10 次）→ move new
     就位（失败回滚改名）→ start 新 exe → 删 .old → 自删 cmd。**只涉两个 exe 路径
     与 cmd 本身**，local\\ 其余数据零触碰。
+    M16：任一步失败先 echo 步进原因+errorlevel 到 failed_path（默认 cmd 同目录
+    FAILED.txt），供程序下次启动在设置页橙字提示，杜绝静默失败。
     """
     new = str(Path(new_exe))
     old = str(Path(old_exe))
     cmd = str(Path(cmd_path))
+    fail = str(Path(failed_path)) if failed_path is not None else \
+        str(Path(cmd).parent / FAILED_NAME)
     return "\r\n".join([
         "@echo off",
         "ping -n 4 127.0.0.1 >nul",
@@ -299,10 +370,12 @@ def render_restart_cmd(new_exe: Path | str, old_exe: Path | str,
         "if not errorlevel 1 goto moved",
         "set /a TRIES+=1",
         "if %TRIES% LSS 10 (ping -n 2 127.0.0.1 >nul & goto retry)",
+        f'echo rename_old_failed rc=%errorlevel% tries=%TRIES%> "{fail}"',
         "goto cleanup",
         ":moved",
         f'move /Y "{new}" "{old}" >nul 2>&1',
         "if not errorlevel 1 goto launch",
+        f'echo move_new_failed rc=%errorlevel%> "{fail}"',
         f'move /Y "{old}.old" "{old}" >nul 2>&1',
         "goto cleanup",
         ":launch",
@@ -314,32 +387,71 @@ def render_restart_cmd(new_exe: Path | str, old_exe: Path | str,
     ])
 
 
+def _writable_dir(base: Path) -> bool:
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        t = base / ".write_test.tmp"
+        t.write_bytes(b"")
+        t.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def apply_update_and_restart(new_exe: Path | str | None = None,
                              current_exe: Path | str | None = None,
-                             spawn=None, exit_fn=None) -> str:
+                             spawn=None, exit_fn=None, elevated: bool = False,
+                             probe=None) -> str:
     """写 restart_update.cmd → 分离进程执行 → 本进程退出。返回 ""=已接管，否则原因。
 
     - current_exe：默认 sys.executable（frozen=TokenWidget.exe 本体）；测试注入。
     - new_exe：默认 staging 的 TokenWidget.new.exe；调用前须已 download_and_stage。
-    - spawn/exit_fn：测试注入替身（默认 os.spawnv P_DETACH + os._exit(0)）。
+    - probe：目录可写预检替身（测试注入；None=真 probe_replace_permission）。
+    - M16 权限加固：预检失败且未提权 → 返回 NEED_ELEVATION 前缀原因（不退出、
+      不 spawn）；面板据此出「提权更新」钮，提权重试 elevated=True 经
+      PowerShell Start-Process -Verb RunAs（一次 UAC；cmd 逻辑不变仅借提权执行）。
+      连 staging/cmd 目录都不可写 → 直接给移动位置指引。
+    - spawnv/exit_fn：测试注入替身（默认 os.spawnv P_DETACH + os._exit(0)）。
     """
     cur = Path(current_exe) if current_exe is not None else Path(sys.executable)
-    base = update_dir()
-    new = Path(new_exe) if new_exe is not None else base / NEW_EXE_NAME
+    new = Path(new_exe) if new_exe is not None else update_dir() / NEW_EXE_NAME
     if not new.is_file():
         return "尚未下载更新包（先「立即下载并更新」）"
     if cur.name.lower() == new.name.lower():
         return "当前运行体不是 TokenWidget.exe（dev 模式不支持自更新）"
+    check = probe_replace_permission if probe is None else probe
+    if not check(cur):                               # 预检失败 → 不退出，交回面板决策
+        if not elevated:
+            return NEED_ELEVATION + "当前目录无写入权限，可选提权更新或移动位置"
+        # 提权路径：cmd 必须落在可写处（exe 目录不可写时退 %TEMP%）
+        base = update_dir()
+        if not _writable_dir(base):
+            base = Path(os.environ.get("TEMP", str(Path.home()))) / "token-widget-update"
+            if not _writable_dir(base):
+                return "当前目录无写入权限：请先把程序移到可写目录（如用户目录）再更新"
+    else:
+        base = update_dir()
+        base.mkdir(parents=True, exist_ok=True)
     cmd_path = base / CMD_NAME
+    fail_path = base / FAILED_NAME
     try:
-        cmd_path.write_text(render_restart_cmd(new, cur, cmd_path),
+        cmd_path.write_text(render_restart_cmd(new, cur, cmd_path, fail_path),
                             encoding="gbk", errors="replace")
     except OSError as e:
         return f"无法写入重启脚本：{str(e)[:80]}"
     spawnv = spawn if spawn is not None else os.spawnv
+    comspec = os.environ.get("COMSPEC", "cmd.exe")
     try:
-        spawnv(os.P_DETACH, os.environ.get("COMSPEC", "cmd.exe"),
-               [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(cmd_path)])
+        if elevated:
+            ps = os.environ.get("SystemRoot", r"C:\Windows") + \
+                r"\System32\WindowsPowerShell\v1.0\powershell.exe"
+            # 一次 UAC：Start-Process -Verb RunAs 包 cmd；PowerShell 自身不需要管理员
+            spawnv(os.P_DETACH, ps, [
+                ps, "-NoProfile", "-Command",
+                f"Start-Process -FilePath cmd.exe -ArgumentList '/c','{cmd_path}' "
+                "-Verb RunAs -WindowStyle Hidden"])
+        else:
+            spawnv(os.P_DETACH, comspec, [comspec, "/c", str(cmd_path)])
     except OSError as e:
         try:
             cmd_path.unlink(missing_ok=True)
