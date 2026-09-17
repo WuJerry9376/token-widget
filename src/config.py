@@ -35,8 +35,11 @@ DEFAULTS: dict = {
     # M15：更新（GitHub Releases）。repo="owner/name"（空=未配置，UI 提示、零网络）；
     # enabled=自动检查开关（设置页「自动更新」）；last_check=上次检查 epoch 秒；
     # M16：last_auto_date=每日 5 点后触发已消费的本地日期（YYYY-MM-DD，防重）。
+    # M18：mirror=下载备用源前缀（""=不使用；仅救 11MB 二进制，版本信息恒走官方 API；
+    # 存 normalize_mirror 规范化形态 "https://host[:port]/"，老 config 缺键经
+    # _merge_sections 向后兼容）。
     "update": {"enabled": True, "repo": "WuJerry9376/token-widget", "last_check": 0,
-               "last_auto_date": ""},
+               "last_auto_date": "", "mirror": ""},
 }
 
 

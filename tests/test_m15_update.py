@@ -13,6 +13,9 @@ apply cmd 文本断言（路径引号/自删/不涉 local 凭据）、失败清�
 手动→下载按钮→二次确认→取消、定时路径只读不自动下载、错误橙字脱敏。
 M16 增补：next_trigger 六路判定/stamp 日期戳/权限预检 probe/NEED_ELEVATION+提权 RunAs
 路径/FAILED.txt 消费/橙点亮点灭点+点击路由/开关与缺 update 节双静默/勾选文案纯「自动更新」。
+M18 增补：u26 改造为 foot GitHub 图标案例（渲染/隐藏零占位/点击 URL 打桩/失败橙字）；
+u28 mirror normalize 两形态+回退链 direct→proxy→mirror 顺序与 digest 校验路径；
+u29 digest 不符拒收+文件清理+镜像缺 digest 拒收（直连缺 digest 放行带 note）。
 """
 from __future__ import annotations
 
@@ -49,7 +52,8 @@ CFG = {"poll_seconds": 300, "low_yellow_pct": 0.15, "low_red_pct": 0.05,
                    "proxy_targets": ["opencode_go", "codex"]},
        "update": {"enabled": True, "repo": "fake-owner/fake-repo",
                   "last_check": int(_now) - 999999,
-                  "last_auto_date": time.strftime("%Y-%m-%d")}}   # 当日=已消费，tick 不野触发
+                  "last_auto_date": time.strftime("%Y-%m-%d"),
+                  "mirror": ""}}   # 当日=已消费，tick 不野触发；M18 mirror 默认不使用
 
 
 def cfg_with(**upd) -> dict:
@@ -79,21 +83,23 @@ class RecReq:
         return r
 
 
-def rel_body(tag="v9.9.9", assets=None, body="release notes"):
-    return json.dumps({"tag_name": tag, "body": body,
-                       "assets": assets if assets is not None else [
-                           {"name": "TokenWidget.exe",
-                            "browser_download_url": "https://dl.example/TokenWidget.exe"},
-                           {"name": "sha256.txt",
-                            "browser_download_url": "https://dl.example/sha256.txt"}
-                       ]}).encode()
+def rel_body(tag="v9.9.9", assets=None, body="release notes", digest=None):
+    a: list = assets if assets is not None else [
+        {"name": "TokenWidget.exe",
+         "browser_download_url": "https://dl.example/TokenWidget.exe"},
+        {"name": "sha256.txt",
+         "browser_download_url": "https://dl.example/sha256.txt"}]
+    if digest is not None and assets is None:
+        a = [dict(a[0], digest=digest), a[1]]
+    return json.dumps({"tag_name": tag, "body": body, "assets": a}).encode()
 
 
 # ------------------------------------------------------- 纯函数 ----
 
 def u1_parse_release_forms() -> str:
     a = up.parse_release(json.loads(rel_body("v1.7.0")))
-    assert a == ("1.7.0", "https://dl.example/TokenWidget.exe", "release notes"), a
+    assert a == ("1.7.0", "https://dl.example/TokenWidget.exe", "release notes",
+                 None), a
     b = up.parse_release(json.loads(rel_body("1.7.0", assets=[   # 无主名但唯一 .exe → 兜底
         {"name": "other.exe", "browser_download_url": "https://dl.example/other.exe"}])))
     assert b[0] == "1.7.0" and b[1] == "https://dl.example/other.exe", b
@@ -102,10 +108,28 @@ def u1_parse_release_forms() -> str:
         {"name": "b.exe", "browser_download_url": "u2"}])))
     assert c[1] == "", c
     d = up.parse_release(json.loads(rel_body(assets=[])))        # 无 asset
-    assert d[1] == "" and d[0] == "9.9.9", d
-    assert up.parse_release("garbage") == ("", "", "")
-    assert up.parse_release({}) == ("", "", "")
-    return "主名匹配/唯一.exe兜底/多exe留空/无asset/坏JSON 五态"
+    assert d[1] == "" and d[0] == "9.9.9" and d[3] is None, d
+    assert up.parse_release("garbage") == ("", "", "", None)
+    assert up.parse_release({}) == ("", "", "", None)
+    # M18：digest 归一——"sha256:<hex>" / 裸 64hex → "sha256:<hex64>"；畸形 → None
+    h = "ab" * 32
+    e = up.parse_release(json.loads(rel_body(digest=f"sha256:{h.upper()}")))
+    assert e[3] == f"sha256:{h}", e
+    f = up.parse_release(json.loads(rel_body(digest=h)))          # 裸 hex 兼容
+    assert f[3] == f"sha256:{h}", f
+    g = up.parse_release(json.loads(rel_body(digest="sha256:short")))   # 非 64hex → None
+    assert g[3] is None, g
+    gh = up.parse_release(json.loads(rel_body(digest="md5:" + h)))      # 非 sha256 → None
+    assert gh[3] is None, gh
+    # digest 跟随**选中 asset**（主名匹配腿），不被兜底腿污染
+    hi = "cd" * 32
+    k = up.parse_release(json.loads(rel_body(assets=[
+        {"name": "TokenWidget.exe", "browser_download_url": "https://dl/t.exe",
+         "digest": f"sha256:{hi}"},
+        {"name": "other.exe", "browser_download_url": "https://dl/o.exe",
+         "digest": "sha256:" + "ee" * 32}])))
+    assert k[3] == f"sha256:{hi}", k
+    return "主名匹配/唯一.exe兜底/多exe留空/无asset/坏JSON/digest 归一与跟腿 七态"
 
 
 def u2_is_newer_matrix() -> str:
@@ -233,22 +257,38 @@ class FakeResp:
 
 
 class FakeCtx:
+    """req_open 注入桩：M18 记录 (full_url, opener) 供回退链顺序/通道断言。"""
+
     def __init__(self, resp):
         self.resp = resp
+        self.calls: list[tuple[str, object]] = []
 
-    def open(self, req, timeout=None):
-        return self.resp
+    def open(self, req, timeout=None, opener=None):
+        self.calls.append((str(req.full_url), opener))
+        r = self.resp.pop(0) if isinstance(self.resp, list) else self.resp
+        if isinstance(r, Exception):
+            raise r
+        return r
 
 
 def u11_download_atomic() -> str:
     d = config_mod.LOCAL_DIR / "update"
     body = b"A" * 1000 + b"B" * 500
     ctx = FakeCtx(FakeResp([b"A" * 1000, b"B" * 500], cl=1500))
-    path, err = up.download_and_stage("https://dl.example/TokenWidget.exe",
-                                      dest_dir=d, req_open=ctx.open)
-    assert err == "" and path is not None and path.name == up.NEW_EXE_NAME, err
-    assert path.read_bytes() == body and not (d / (up.NEW_EXE_NAME + ".part")).exists()
-    return "流式 .part → 长度符 → rename 就位，无 .part 残留"
+    r = up.download_and_stage("https://dl.example/TokenWidget.exe",
+                              dest_dir=d, req_open=ctx.open)
+    assert r.err == "" and r.path is not None and r.path.name == up.NEW_EXE_NAME, r.err
+    assert r.path.read_bytes() == body and not (d / (up.NEW_EXE_NAME + ".part")).exists()
+    assert r.channel == "direct" and "digest" in r.note, "无 digest 直连放行+note 说明"
+    # M18：digest 匹配路径（流式 sha256 校验通过）
+    body2 = b"C" * 777
+    dig = "sha256:" + hashlib.sha256(body2).hexdigest()
+    ctx2 = FakeCtx(FakeResp([body2], cl=len(body2)))
+    r2 = up.download_and_stage("https://dl.example/TokenWidget.exe", digest=dig,
+                               dest_dir=d, req_open=ctx2.open)
+    assert r2.err == "" and r2.channel == "direct" and r2.note == "", (r2.err, r2.note)
+    assert r2.path.read_bytes() == body2
+    return "流式 .part → 长度符 → rename 就位，无 .part 残留；digest 匹配放行"
 
 
 def u12_download_len_mismatch() -> str:
@@ -257,9 +297,9 @@ def u12_download_len_mismatch() -> str:
         if f.exists():
             f.unlink()                                # 前案残留清理（独立断言）
     ctx = FakeCtx(FakeResp([b"X" * 100], cl=999))
-    path, err = up.download_and_stage("https://dl.example/x.exe", dest_dir=d,
-                                      req_open=ctx.open)
-    assert path is None and "长度不符" in err
+    r = up.download_and_stage("https://dl.example/x.exe", dest_dir=d,
+                              req_open=ctx.open)
+    assert r.path is None and "长度不符" in r.err
     assert not (d / (up.NEW_EXE_NAME + ".part")).exists() and not (d / up.NEW_EXE_NAME).exists()
     return "Content-Length 不符 → 弃+清理 .part"
 
@@ -267,17 +307,16 @@ def u12_download_len_mismatch() -> str:
 def u13_download_no_cl_and_crash() -> str:
     d = config_mod.LOCAL_DIR / "update"
     ctx = FakeCtx(FakeResp([b"Y" * 10], cl=None))
-    path, err = up.download_and_stage("https://dl.example/x.exe", dest_dir=d,
-                                      req_open=ctx.open)
-    assert path is None and "Content-Length" in err
+    r = up.download_and_stage("https://dl.example/x.exe", dest_dir=d, req_open=ctx.open)
+    assert r.path is None and "Content-Length" in r.err
     ctx2 = FakeCtx(FakeResp([b"Z" * 10, b"W" * 10], cl=999, boom_after=1))
-    path2, err2 = up.download_and_stage("https://dl.example/x.exe", dest_dir=d,
-                                        req_open=ctx2.open)
-    assert path2 is None and "下载失败" in err2                      # 中途断流
+    r2 = up.download_and_stage("https://dl.example/x.exe", dest_dir=d,
+                               req_open=ctx2.open)
+    assert r2.path is None and "下载失败" in r2.err                     # 中途断流
     assert not (d / (up.NEW_EXE_NAME + ".part")).exists(), "断流后 .part 必须清理"
     for bad in ("http://insecure/x.exe", "", None):
-        p3, e3 = up.download_and_stage(bad, dest_dir=d)
-        assert p3 is None and "https" in e3
+        r3 = up.download_and_stage(bad, dest_dir=d)
+        assert r3.path is None and "https" in r3.err
     return "缺 CL 拒下/断流清理/非 https 拒绝（零网络）"
 
 
@@ -467,6 +506,10 @@ def u20_panel_render_and_toggle(app, root) -> str:
     assert any(f"v{APP_VERSION}" in t for t in texts), "当前版本灰字"
     assert panel.btn_up_check.cget("text") == "检查更新"
     assert any("未配置" in t for t in texts), "空 repo → 源未配置提示（零网络）"
+    # M18：镜像源行渲染 + 信任链注记
+    assert any(t == "镜像源（可选）" for t in texts), "镜像 Entry 行标签"
+    assert any("版本信息始终来自 GitHub 官方 API" in t for t in texts), "FAINT 注记"
+    assert panel.ent_mirror.winfo_manager() != "", "Entry 在位"
     assert panel.var_up_auto.get() is True, "DEFAULTS enabled=True"
     panel.var_up_auto.set(False)
     panel._save_update_cfg()
@@ -685,9 +728,12 @@ def u25_skipped_text_lock(app, root) -> str:
     return "skipped=上次检查时刻/四禁词/--与跨日形态"
 
 
-def u26_star_button(app, root) -> str:
-    """M17：☆ 按钮渲染/启用态/点击 URL 断言（webbrowser 打桩，零真浏览器零网络）；
-    拉起失败橙字；slug 空=禁用融纸+点击零唤起。"""
+def u26_gh_foot_icon(app, root) -> str:
+    """M18（u26 改造非删案例）：foot GitHub 图标渲染/隐藏零占位/点击 URL 打桩/失败橙字。
+
+    M17 星形按钮按用户改向删除：断言「☆ 给本项目加星」文本与 btn_star 控件不得回流；
+    图标挂在 foot 行 lbl_ver 左侧（side=right 后 pack 者居左），有 slug=显示、
+    空 slug=pack_forget 零占位；点击 webbrowser.open 打桩断 URL；失败/异常橙字。"""
     import webbrowser as _wb
     orig_open = _wb.open
     urls: list = []
@@ -697,34 +743,165 @@ def u26_star_button(app, root) -> str:
         panel = settings_panel.SettingsPanel(app)
         panel.withdraw()
         texts = texts_of(panel, [])
-        assert any(t == "☆ 给本项目加星" for t in texts), "按钮文案"
-        assert any("在浏览器中打开项目页" in t for t in texts), "FAINT 注记"
-        assert str(panel.btn_star.cget("state")) == "normal", "有 slug 可点"
-        panel.btn_star.invoke()
+        # 旧星形入口不得回流（改向案例的"删净"半边）
+        assert all("加星" not in t for t in texts), "M17 星按钮文案不得回流"
+        assert all("给本项目" not in t for t in texts)
+        assert not hasattr(panel, "btn_star"), "btn_star 控件必须已删除"
+        # 图标渲染态：已 pack、image 非空、尺寸≥12 物理px（foot 行高派生，DPI 自适应）
+        assert panel.lbl_gh.winfo_manager() == "pack", "slug 有 → 图标 pack 在位"
+        assert panel.lbl_gh.pack_info()["side"] == "right"
+        assert str(panel.lbl_gh.cget("image")) != "", "PhotoImage 已挂上"
+        assert panel._gh_px >= 12 and panel.lbl_gh.cget("cursor") == "hand2"
+        assert panel.lbl_gh.bind("<Button-1>"), "点击绑定已挂"
+        # 位置：lbl_gh 在 lbl_ver 左侧（foot 行 right-pack 序 → icon 先落位）
+        panel.update_idletasks()
+        assert panel.lbl_ver.winfo_manager() == "pack"
+        # 点击：URL 派生自配置 slug（零写死）
+        panel._up_open_repo()
         assert urls == ["https://github.com/fake-owner/fake-repo"], urls
-        assert "未能拉起" not in panel.lbl_up.cget("text")          # 成功静默
+        assert "未能拉起" not in panel.lbl_up.cget("text")            # 成功静默
         _wb.open = lambda u: False
-        panel._up_star()
-        assert "未能拉起浏览器" in panel.lbl_up.cget("text")        # 失败→橙字一句
+        panel._up_open_repo()
+        assert "未能拉起浏览器" in panel.lbl_up.cget("text")          # 失败→橙字兜底同 M17
         assert panel.lbl_up.cget("fg").lower() == ORANGE.lower()
         def boom(u):
             raise RuntimeError("no default browser")
         _wb.open = boom
-        panel._up_star()
-        assert "未能拉起浏览器" in panel.lbl_up.cget("text")        # 异常同样兜底
+        panel._up_open_repo()
+        assert "未能拉起浏览器" in panel.lbl_up.cget("text")          # 异常同样兜底
+        # hover 两档：Enter→SOFT 图、Leave→FAINT 图（image 对象切换）
+        im0 = panel.lbl_gh.cget("image")
+        panel._gh_enter()
+        assert panel.lbl_gh.cget("image") != im0, "hover 换 SOFT 档"
+        assert panel._gh_tipw is not None and "打开 GitHub 仓库页" in \
+            panel._gh_tipw.winfo_children()[0].cget("text"), "tooltip 文案"
+        panel._gh_leave()
+        assert panel.lbl_gh.cget("image") == im0, "离 hover 回 FAINT 档"
         panel.destroy()
+        # 空 slug → 隐藏零占位（foot 布局回原样）+ 点击零唤起
         urls.clear()
         clear_cfg(repo="", enabled=False)
         p2 = settings_panel.SettingsPanel(app)
         p2.withdraw()
-        assert str(p2.btn_star.cget("state")) == "disabled", "空 slug → 禁用态"
-        assert str(p2.btn_star.cget("bg")).lower() == PAPER.lower(), "禁用融纸（同代理组语言）"
-        p2._up_star()
+        assert p2.lbl_gh.winfo_manager() == "", "空 slug → pack_forget 零占位"
+        assert p2.lbl_ver.winfo_manager() == "pack", "版本签名仍在（foot 回原样）"
+        p2._up_open_repo()
         assert urls == [], "空 slug 绝不唤起浏览器"
         p2.destroy()
     finally:
         _wb.open = orig_open
-    return "渲染/启用/URL 断言/静默成功/失败橙字/空 slug 禁用零唤起"
+    return "foot 图标：渲染/hover 换档/tooltip/URL 断言/失败橙字/空 slug 零占位/星钮不回流"
+
+
+def u28_mirror_normalize_chain() -> str:
+    """M18：mirror normalize 两形态统一 + 回退链顺序 direct→proxy→mirror 与 digest 校验路径。"""
+    nm = up.normalize_mirror
+    # 形态①纯前缀：补 https://、去尾 /、统一带尾 / 拼接式
+    assert nm("ghfast.top") == "https://ghfast.top/"
+    assert nm("https://ghfast.top") == "https://ghfast.top/"
+    assert nm("https://ghfast.top/") == "https://ghfast.top/"
+    assert nm("http://127.0.0.1:8080/mirror") == "http://127.0.0.1:8080/"   # 路径丢弃
+    # 形态②占位式：/https://… 段视为被加速 URL → 统一存带尾 / 前缀拼接式
+    assert nm("https://ghfast.top/https://github.com/o/r/releases/download/a.exe") \
+        == "https://ghfast.top/"
+    assert nm("  ") == "" and nm("") == "" and nm(None) == ""               # 空=不使用
+    for bad in ("socks://ghfast.top", "https://user:pw@ghfast.top/",
+                "not a url!", "https://bad..port:99999/"):
+        assert nm(bad) == "", bad
+    # 拼接语义：两形态 normalize 后拼原 URL 一致（占位式的自然形态）
+    u = "https://github.com/o/r/releases/download/v1/TokenWidget.exe"
+    assert up.mirror_join(nm("https://ghfast.top/"), u) == "https://ghfast.top/" + u
+    assert up.mirror_join("", u) == u
+    # ---- 回退链：直连炸 → 代理腿炸 → 镜像腿成（digest 必校验）----
+    d = config_mod.LOCAL_DIR / "update"
+    for f in (d / up.NEW_EXE_NAME, d / (up.NEW_EXE_NAME + ".part")):
+        if f.exists():
+            f.unlink()
+    body = b"M" * 1234
+    dig = "sha256:" + hashlib.sha256(body).hexdigest()
+    cfg = cfg_with(mirror="https://ghfast.top/")
+    cfg["network"] = {**CFG["network"], "proxy_enabled": True, "proxy_url": PX}
+    ctx = FakeCtx([urllib.error.URLError("direct down"),
+                   urllib.error.URLError("proxy down"),
+                   FakeResp([body], cl=len(body))])
+    r = up.download_and_stage(u, cfg=cfg, digest=dig, dest_dir=d, req_open=ctx.open)
+    assert r.err == "" and r.channel == "mirror", (r.err, r.channel)
+    assert [c[0] for c in ctx.calls] == [u, u, "https://ghfast.top/" + u], \
+        "调用序列：直连→代理（同 URL 换 opener）→镜像（拼接 URL）"
+    assert ctx.calls[0][1] is None, "第一趟直连（无 opener）"
+    assert isinstance(ctx.calls[1][1], urllib.request.OpenerDirector), "第二趟经 build_opener"
+    assert ctx.calls[2][1] is None, "镜像腿走直连（国内镜像不需代理）"
+    assert r.path.read_bytes() == body
+    # 代理未开+镜像已配：两腿 direct→mirror（proxy 腿缺席）
+    ctx2 = FakeCtx([urllib.error.URLError("d"), FakeResp([body], cl=len(body))])
+    r2 = up.download_and_stage(u, cfg=cfg_with(mirror="ghfast.top"), digest=dig,
+                               dest_dir=d, req_open=ctx2.open)
+    assert r2.channel == "mirror" and len(ctx2.calls) == 2, (r2.err, ctx2.calls)
+    # 三链全败：报错含链描述且脱敏（代理 URL 认证段不打漏）
+    ctx3 = FakeCtx([urllib.error.URLError("a"), urllib.error.URLError("b"),
+                    urllib.error.URLError("c")])
+    cfg3 = cfg_with(mirror="https://ghfast.top/")
+    cfg3["network"] = {**CFG["network"], "proxy_enabled": True,
+                       "proxy_url": "http://user:pass@127.0.0.1:7890"}
+    r3 = up.download_and_stage(u, cfg=cfg3, digest=dig, dest_dir=d, req_open=ctx3.open)
+    assert r3.path is None and "direct→proxy→mirror 全部失败" in r3.err, r3.err
+    assert "user:pass" not in r3.err, "错误脱敏"
+    # check 不走镜像：API URL 恒官方（Req 桩断言零 mirror 拼接）
+    rec = RecReq([(200, {}, rel_body("v9.9.9"))])
+    up.check(cfg_with(mirror="https://ghfast.top/"), req=rec, now=_now)
+    assert rec.calls[0][0] == up.GITHUB_API.format(slug="fake-owner/fake-repo"), \
+        "元数据永远取自官方 API（镜像只救二进制）"
+    return "normalize 两形态/拒绝态 + 链序 direct→proxy→mirror + 镜像腿 digest 校验"
+
+
+def u29_digest_guard() -> str:
+    """M18：digest 不符拒收+清理；镜像缺 digest 拒收；直连/代理缺 digest 放行带 note。"""
+    d = config_mod.LOCAL_DIR / "update"
+    u = "https://github.com/o/r/releases/download/v1/TokenWidget.exe"
+    body = b"T" * 500
+    good = "sha256:" + hashlib.sha256(body).hexdigest()
+
+    def wipe():
+        for f in (d / up.NEW_EXE_NAME, d / (up.NEW_EXE_NAME + ".part")):
+            if f.exists():
+                f.unlink()
+
+    # ① digest 不符 → 删文件报错（单腿失败无链后缀）
+    wipe()
+    ctx = FakeCtx(FakeResp([body], cl=len(body)))
+    r = up.download_and_stage(u, digest="sha256:" + "0" * 64, dest_dir=d,
+                              req_open=ctx.open)
+    assert r.path is None and "SHA-256 完整性校验不符" in r.err, r.err
+    assert not (d / (up.NEW_EXE_NAME + ".part")).exists() and not (d / up.NEW_EXE_NAME).exists(), \
+        "校验败 .part 与成品双清"
+    # ①b 镜像腿 digest 不符 → 换腿语义：三腿皆败（不符错误透传+链描述）
+    wipe()
+    ctx2 = FakeCtx([FakeResp([b"F" * 100], cl=100)] * 1 +
+                   [FakeResp([b"F" * 100], cl=100)] +
+                   [FakeResp([b"F" * 100], cl=100)])
+    r2 = up.download_and_stage(u, cfg=cfg_with(mirror="https://ghfast.top/"),
+                               digest=good, dest_dir=d, req_open=ctx2.open)
+    assert r2.path is None and "SHA-256" in r2.err and "全部失败" in r2.err, r2.err
+    assert not (d / (up.NEW_EXE_NAME + ".part")).exists()
+    # ② 镜像腿缺 digest → 拒收（即便字节流完好）
+    wipe()
+    cfgm = cfg_with(mirror="https://ghfast.top/")
+    ctx3 = FakeCtx([urllib.error.URLError("direct down"),
+                    FakeResp([body], cl=len(body))])       # 只到 mirror 腿（代理未开）
+    r3 = up.download_and_stage(u, cfg=cfgm, digest=None, dest_dir=d, req_open=ctx3.open)
+    assert r3.path is None and "镜像" in r3.err and "SHA-256" in r3.err, r3.err
+    assert not (d / (up.NEW_EXE_NAME + ".part")).exists(), "拒收后零残留"
+    # ③ 直连缺 digest → 放行 + note 说明（信任锚缺失如实标注，不静默）
+    wipe()
+    ctx4 = FakeCtx(FakeResp([body], cl=len(body)))
+    r4 = up.download_and_stage(u, digest=None, dest_dir=d, req_open=ctx4.open)
+    assert r4.path is not None and r4.channel == "direct" and "digest" in r4.note
+    # ④ 直连坏 digest 入参（畸形）→ 按缺省路径处理（不炸）
+    wipe()
+    ctx5 = FakeCtx(FakeResp([body], cl=len(body)))
+    r5 = up.download_and_stage(u, digest="sha256:zzz", dest_dir=d, req_open=ctx5.open)
+    assert r5.path is not None and "digest" in r5.note
+    return "不符拒收双清/多腿换腿/镜像缺哈希拒收/直连缺哈希放行 note/畸形入参不炸"
 
 
 def clear_cfg(**upd) -> None:
@@ -764,6 +941,8 @@ CASES_PURE = [
     ("probe", u18_probe),
     ("elevation", u19_elevation),
     ("repo_url", u27_repo_url),
+    ("mirror_chain", u28_mirror_normalize_chain),
+    ("digest_guard", u29_digest_guard),
 ]
 
 CASES_TK = [
@@ -773,7 +952,7 @@ CASES_TK = [
     ("panel_failed_forceopen", u23_panel_failed_note_and_force_open),
     ("tick_triggers_dot", u24_tick_triggers_and_dot),
     ("skipped_text_lock", u25_skipped_text_lock),
-    ("star_button", u26_star_button),
+    ("gh_foot_icon", u26_gh_foot_icon),
 ]
 
 

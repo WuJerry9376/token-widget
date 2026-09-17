@@ -17,15 +17,30 @@
   move new 就位 → start → 删 .old → 自删；改名失败按次重试）。全程只动
   local\\update\\ 与 exe 本体，**旧 .dpapi / auth.json 等凭据数据零触碰**。
 - 任何失败路径：清理 .part、返回已脱敏原因、不 crash。
+
+M18（镜像备用源 + SHA-256 信任锚，镜像源裁决落地）：
+- config.update.mirror：下载备用源前缀（""=不使用）。回退链 download_and_stage：
+  ①直连 → ②代理开启则经 build_opener → ③镜像配置则拼「前缀+原URL」重试；
+  成功返回值携带 used_channel（channel 字段），三链全败才报失败（错误脱敏）。
+- 信任锚=sha256：parse_release 增读 asset.digest（GitHub API "sha256:<hex>"，
+  2025+ 提供；缺失/畸形 → None）；download_and_stage 流式 hashlib 校验——
+  digest 有值必校验（不符删文件报错）；digest 缺失：镜像通道**拒收**（第三方可
+  篡改字节且无哈希可验），直连/代理放行并在返回 note 说明。
+- **API 元数据（check）永不走镜像**：api.github.com 直连/代理，失败如实报错——
+  镜像只救二进制，不救信任链。
+- normalize_mirror：宽进（无 scheme 补 https://、占位式「前缀/https://…」与纯
+  前缀两形态统一存 "scheme://host[:port]/" 拼接式）；非法/空 → ""（不使用）。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +54,7 @@ UA = "token-widget/updater"                         # GitHub API 无 UA 直接 4
 TIMEOUT = 20
 CHECK_INTERVAL_SECONDS = 6 * 3600                   # 定时检查频控窗口（6h）
 ASSET_NAME = "TokenWidget.exe"                      # 主匹配资源名（大小写不敏感）
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")         # M18 digest 归一判据
 
 _UPDATE_REL = Path("update")
 NEW_EXE_NAME = "TokenWidget.new.exe"
@@ -54,6 +70,7 @@ class UpdateInfo:
     version: str                    # 去 v 前缀的 tag
     url: str                        # 目标 exe 下载直链（可空串=无可用资源）
     notes: str = ""                 # release body（原文，展示端截断）
+    digest: str | None = None       # M18：asset.digest "sha256:<hex64>"；无/畸形=None
 
 
 @dataclass
@@ -63,6 +80,20 @@ class CheckResult:
     info: UpdateInfo | None = None
     err: str = ""
     skipped: bool = False
+
+
+@dataclass
+class DownloadResult:
+    """M18 download_and_stage 统一返回。
+
+    - path：就位后的 new exe（失败=None）；err：脱敏失败文案（成功=""）；
+    - channel：成功所用通道 "direct"|"proxy"|"mirror"（失败时=已尝试链描述）；
+    - note：审计说明（如「官方 API 未提供 SHA-256 digest，未校验放行」），永不抛。
+    """
+    path: Path | None = None
+    err: str = ""
+    channel: str = ""
+    note: str = ""
 
 
 def update_dir() -> Path:
@@ -115,16 +146,31 @@ def is_newer(candidate, current) -> bool:
     return _ver_tuple(candidate) > _ver_tuple(current)
 
 
-def parse_release(j) -> tuple[str, str, str]:
-    """releases/latest JSON → (version, url, notes)。
+def _asset_digest(a: dict) -> str | None:
+    """M18：asset.digest → 归一 "sha256:<hex64>"；缺失/畸形/非 sha 前缀裸非 64hex → None。
+
+    GitHub Releases API 2025+ 在 asset 上提供 digest（形如 "sha256:abcd…"）；
+    兼容裸 64-hex 形态。宁缺勿错：解析不出一把可信哈希就按 None 处理。"""
+    d = a.get("digest")
+    if not isinstance(d, str):
+        return None
+    t = d.strip().lower()
+    if t.startswith("sha256:"):
+        t = t.split(":", 1)[1].strip()
+    return f"sha256:{t}" if _SHA256_HEX.fullmatch(t) else None
+
+
+def parse_release(j) -> tuple[str, str, str, str | None]:
+    """releases/latest JSON → (version, url, notes, digest)。
 
     - tag_name 去 v 前缀；缺失/非 dict → version=""；
     - 资源：先按名匹配 TokenWidget.exe（大小写不敏感）；无则**唯一** .exe 兜底；
       多个 .exe 且无主名 → url=""（宁缺勿错下）。draft/prerelease 不在本函数判定范围
       （latest 端点已过滤）。
+    - M18：digest 取自**选中的那个 asset** 的 digest 字段（None=API 未提供）。
     """
     if not isinstance(j, dict):
-        return "", "", ""
+        return "", "", "", None
     tag = j.get("tag_name")
     version = ""
     if isinstance(tag, str) and tag.strip():
@@ -141,13 +187,15 @@ def parse_release(j) -> tuple[str, str, str]:
         url = str(a.get("browser_download_url") or "")
         if not url:
             continue
+        ent = (url, _asset_digest(a))
         if name.lower() == ASSET_NAME.lower():
-            named.append(url)
+            named.append(ent)
         if name.lower().endswith(".exe"):
-            exes.append(url)
-    url = named[0] if named else (exes[0] if len(exes) == 1 else "")
+            exes.append(ent)
+    pick = named[0] if named else (exes[0] if len(exes) == 1 else ("", None))
+    url, digest = pick
     notes = j.get("body")
-    return version, url, notes if isinstance(notes, str) else ""
+    return version, url, notes if isinstance(notes, str) else "", digest
 
 
 def _req(url: str, headers: dict, opener=None) -> tuple[int, dict, bytes]:
@@ -173,6 +221,8 @@ def check(cfg: dict, force: bool = False, now: float | None = None,
 
     频控：非 force 且距 last_check <6h → skipped（零网络）。
     代理回落：默认直连；失败且 network.proxy_enabled+URL 合法 → 经代理重试一次。
+    M18：**本函数永不走镜像**（api.github.com 是信任锚，镜像只救二进制下载；
+    元数据失败如实报错，不做第三方中转）。
     """
     sec = _section(cfg)
     slug = parse_repo(sec.get("repo"))
@@ -208,10 +258,11 @@ def check(cfg: dict, force: bool = False, now: float | None = None,
             j = json.loads(body)
         except ValueError:
             return CheckResult(err="GitHub API 响应非 JSON")
-        ver, dl, notes = parse_release(j)
+        ver, dl, notes, digest = parse_release(j)
         if not ver:
             return CheckResult(err="响应缺少 tag_name（仓库无 release？）")
-        return CheckResult(ok=True, info=UpdateInfo(version=ver, url=dl, notes=notes))
+        return CheckResult(ok=True, info=UpdateInfo(version=ver, url=dl,
+                                                    notes=notes, digest=digest))
     return CheckResult(err=err + ("（直连与代理均失败）" if fallback_ok else "（直连失败）"))
 
 
@@ -279,58 +330,175 @@ def stamp_auto_trigger(cfg: dict, trig: str, now: float | None = None,
         cfg["update"] = sec
 
 
-def download_and_stage(url: str, dest_dir: Path | str | None = None,
-                       opener=None, req_open=None, chunk: int = 65536
-                       ) -> tuple[Path | None, str]:
+# ---------------- M18：镜像备用源（仅救二进制；元数据永不走镜像） ----------------
+
+def normalize_mirror(s) -> str:
+    """用户输入 → 规范拼接前缀 "scheme://host[:port]/"；空/非法 → ""（不使用）。
+
+    两种输入形态统一收敛为「前缀 + 原URL」拼接式：
+    - 纯前缀："ghfast.top" / "https://ghfast.top" / "https://ghfast.top/" → 补
+      https:// 前缀、去路径、补尾 "/"；
+    - 占位式："https://ghfast.top/https://github.com/…" → 视 "/" 后为被加速 URL，
+      同样只取 origin 段 → "https://ghfast.top/"。
+    即**路径段一律丢弃**（两形态 normalize 后拼原 URL 语义一致）。拒绝：非法字符、
+    端口越界、socks 等非标 scheme、含 userinfo（镜像不携带凭据）。永不抛。
+    """
+    if not isinstance(s, str):
+        return ""
+    t = s.strip()
+    if not t:
+        return ""
+    if "://" not in t:
+        t = "https://" + t
+    try:
+        p = urllib.parse.urlsplit(t)
+        port = p.port                                 # 非数字/越界 → ValueError
+    except ValueError:
+        return ""
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https") or not p.hostname:
+        return ""
+    if p.username is not None or p.password is not None:
+        return ""
+    if not re.fullmatch(r"[\w.\\-]+|\[[0-9a-fA-F:]+]", p.hostname):
+        return ""                                     # 域名/IPv6 字面量之外视为畸形
+    hb = p.hostname if p.hostname.startswith("[") else p.hostname
+    host = f"{hb}:{port}" if port else hb
+    return f"{scheme}://{host}/"
+
+
+def mirror_join(mirror: str, url: str) -> str:
+    """拼接式套用：normalize 后的前缀 + 原 URL（占位式镜像的自然形态）。"""
+    return (mirror + url) if mirror else url
+
+
+def _dl_attempts(cfg, url: str) -> list[tuple[str, str, object]]:
+    """回退链 (channel, target_url, opener)：①直连 ②代理开启+合法 ③镜像配置。
+
+    与 check() 的代理回落语义同源（netconfig.build_opener）；镜像腿走直连
+    （国内镜像无需代理）。cfg=None/非 dict → 只有直连腿（旧调用零改动语义）。
+    """
+    attempts: list[tuple[str, str, object]] = [("direct", url, None)]
+    if isinstance(cfg, dict):
+        net = _config_net(cfg)
+        proxy = netconfig.normalize_proxy_url(net.get("proxy_url")) \
+            if net.get("proxy_enabled") else None
+        if proxy:
+            attempts.append(("proxy", url, netconfig.build_opener(proxy)))
+        mir = normalize_mirror(_section(cfg).get("mirror"))
+        if mir:
+            attempts.append(("mirror", mirror_join(mir, url), None))
+    return attempts
+
+
+def _digest_expect(digest) -> str | None:
+    """digest 入参归一（"sha256:<hex64>" / 裸 64hex → 标准形态；其余 → None）。"""
+    if not isinstance(digest, str):
+        return None
+    t = digest.strip().lower()
+    if t.startswith("sha256:"):
+        t = t.split(":", 1)[1].strip()
+    return f"sha256:{t}" if _SHA256_HEX.fullmatch(t) else None
+
+
+def _dl_open(req, timeout: float, att_opener, req_open):
+    """传输接缝：req_open(r, timeout=, opener=) 注入点（测试记录通道三要素）。"""
+    if req_open is not None:
+        return req_open(req, timeout=timeout, opener=att_opener)
+    target = att_opener if att_opener is not None else urllib.request.build_opener()
+    return target.open(req, timeout=timeout)
+
+
+def download_and_stage(url: str, cfg: dict | None = None, digest: str | None = None,
+                       dest_dir: Path | str | None = None, opener=None,
+                       req_open=None, chunk: int = 65536) -> DownloadResult:
     """流式下载到 <dest>/TokenWidget.new.exe（.part → 校验 → rename）。
 
-    返回 (最终路径|None, 错误文案)。Content-Length 必存在且与实收一致才就位；
-    任何失败清理 .part。只写 update 目录，不触碰既有凭据/配置。
+    M18 回退链（_dl_attempts）：直连 → 代理（开启则经 build_opener）→ 镜像
+    （配置则「前缀+原URL」重试）；每腿失败进下一腿，返回值 channel 记录**成功**
+    所用通道，三链全败 err 汇总（脱敏）。
+    完整性判据（按优先级）：
+    1. Content-Length 必存在且与实收一致；
+    2. digest 有值 → 流式 sha256 **必校验**，不符删 .part 报错（换腿重试）；
+    3. digest 缺失：mirror 腿**拒收**（第三方字节无官方哈希不可信，删 .part）；
+       direct/proxy 腿放行，note 说明「官方 API 未提供 digest，未做哈希校验」。
+    任何失败清理 .part；只写 update 目录，不触碰既有凭据/配置。opener 参数为
+    直连腿 opener 显式覆盖（历史测试/注入用），代理/镜像腿由 cfg 决定。
     """
     if not isinstance(url, str) or not url.lower().startswith("https://"):
-        return None, "下载链接非法（仅支持 https）"
+        return DownloadResult(err="下载链接非法（仅支持 https）")
+    want = _digest_expect(digest)
     base = Path(dest_dir) if dest_dir is not None else update_dir()
+    last_err = ""
+    tried: list[str] = []
     try:
         base.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return DownloadResult(err=netconfig.sanitize_proxy_msg(
+            f"无法创建下载目录：{str(e)[:80]}"))
+    for label, target_url, att_opener in _dl_attempts(cfg, url):
+        tried.append(label)
+        if label == "mirror" and want is None:
+            last_err = "镜像源下载缺少官方 SHA-256 校验值，已拒收（镜像腿不可信裸字节）"
+            continue
         part = base / (NEW_EXE_NAME + ".part")
         final = base / NEW_EXE_NAME
-        if part.exists():
-            part.unlink()
-        r = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
-        target = opener if opener is not None else urllib.request.build_opener()
-        opened = req_open or target.open
-        got = 0
-        with opened(r, timeout=TIMEOUT) as resp:
-            st = int(getattr(resp, "status", 200) or 200)
-            if st != 200:
-                return None, f"下载返回 HTTP {st}"
-            cl = None
-            getter = getattr(resp.headers, "get", None)
-            if callable(getter):
-                cl = getter("content-length")
-            try:
-                cl_n = int(cl)
-            except (TypeError, ValueError):
-                return None, "响应缺 Content-Length，无法校验完整性（已放弃）"
-            with part.open("wb") as fh:
-                while True:
-                    buf = resp.read(chunk)
-                    if not buf:
-                        break
-                    fh.write(buf)
-                    got += len(buf)
-        if got != cl_n:
-            part.unlink(missing_ok=True)
-            return None, f"长度不符：声明 {cl_n} 实收 {got}（已放弃）"
-        os.replace(part, final)
-        return final, ""
-    except (urllib.error.URLError, OSError) as e:
         try:
-            (base / (NEW_EXE_NAME + ".part")).unlink(missing_ok=True)
-        except OSError:
-            pass
-        return None, netconfig.sanitize_proxy_msg(
-            f"下载失败：{str(getattr(e, 'reason', e))[:120]}")
+            if part.exists():
+                part.unlink()
+            r = urllib.request.Request(target_url, headers={"User-Agent": UA},
+                                       method="GET")
+            got = 0
+            hasher = hashlib.sha256()
+            with _dl_open(r, TIMEOUT, opener if label == "direct" else att_opener,
+                          req_open) as resp:
+                st = int(getattr(resp, "status", 200) or 200)
+                if st != 200:
+                    last_err = f"下载返回 HTTP {st}"
+                    continue
+                cl = None
+                getter = getattr(resp.headers, "get", None)
+                if callable(getter):
+                    cl = getter("content-length")
+                try:
+                    cl_n = int(cl)
+                except (TypeError, ValueError):
+                    last_err = "响应缺 Content-Length，无法校验完整性（已放弃）"
+                    continue
+                with part.open("wb") as fh:
+                    while True:
+                        buf = resp.read(chunk)
+                        if not buf:
+                            break
+                        fh.write(buf)
+                        hasher.update(buf)
+                        got += len(buf)
+            if got != cl_n:
+                part.unlink(missing_ok=True)
+                last_err = f"长度不符：声明 {cl_n} 实收 {got}（已放弃）"
+                continue
+            if want is not None:
+                got_hex = f"sha256:{hasher.hexdigest()}"
+                if got_hex != want:
+                    part.unlink(missing_ok=True)
+                    last_err = ("SHA-256 完整性校验不符（可能遭篡改或截断，已删除）："
+                                f"期望 {want[:18]}… 实收 {got_hex[:18]}…")
+                    continue
+                note = ""
+            else:
+                note = "官方 API 未提供 SHA-256 digest，本次未做哈希校验（直连/代理放行）"
+            os.replace(part, final)
+            return DownloadResult(path=final, channel=label, note=note)
+        except (urllib.error.URLError, OSError) as e:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+            last_err = netconfig.sanitize_proxy_msg(
+                f"下载失败：{str(getattr(e, 'reason', e))[:120]}")
+            continue
+    suffix = "" if len(tried) <= 1 else f"（{'→'.join(tried)} 全部失败）"
+    return DownloadResult(err=(last_err or "下载失败") + suffix)
 
 
 def probe_replace_permission(exe_path: Path | str | None = None) -> bool:

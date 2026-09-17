@@ -19,6 +19,12 @@
 - M13：状态行右下角加版本签名「v<APP_VERSION> · by Jerry Wu」（f_note 字档 / FAINT，
   side=right 随面板宽度右对齐）；版本号取自 src/version.py 单一事实源，
   随 build/version_info.txt 同步由 fix-2 流程负责。
+- M18：①M17 星形按钮按用户改向**删除**——foot 行版本签名左侧 GitHub 剪影图标
+  （超采样 PhotoImage，简化 Invertocat：圆头+双耳+底触手；FAINT 墨、hover 转
+  SOFT；点击 webbrowser 开仓页，失败橙字兜底同 M17；slug 空=隐藏零占位）；
+  ②更新分组加「镜像源（可选）」Entry 行（粘贴即存 normalize_mirror 规范化，
+  纯前缀/占位式两形态统一存 "scheme://host/" 拼接式；仅加速二进制下载，
+  版本信息恒走 GitHub 官方 API）。绘图函数在本模块（共享小模块刻意不外溢 ui.py）。
 """
 from __future__ import annotations
 
@@ -35,8 +41,8 @@ from . import auth, autostart, config as config_mod, netconfig, updater
 from .version import APP_VERSION
 from . import version as _version        # 属性引用（非 from import）：单一事实源可被测试钉验
 from .ui import (CRED_ERRORS, BADGE_BG, BADGE_EDGE, FAINT, INK, OK, ORANGE,
-                 PAPER, PAPER_EDGE, SOFT, SOFT_TXT, RED, TRACK, TRACK_EDGE,
-                 WIN_LABELS, fmt_value, work_area)
+                 PAPER, PAPER_EDGE, SOFT, SOFT_TXT, TIP_BG, TIP_FG,
+                 RED, TRACK, TRACK_EDGE, WIN_LABELS, fmt_value, work_area)
 
 ENTRY_BG = "#FFFCF0"
 YELLOW_FG = "#8A651F"        # 阈值输入框文字色（区别于状态红绿，避免误读为报错）
@@ -202,6 +208,89 @@ def _split_proxy_echo(stored) -> tuple[str, str]:
     return (head, tail) if sep and tail.isdigit() else (rest, "")
 
 
+# ---------- M18：foot 行 GitHub 剪影图标（超采样光栅，同 ui._gen_rot_icons 技术栈） ----------
+#
+# Tk 8.6 PhotoImage 无 per-pixel alpha → 解析式子点覆盖判定 + 笔画 premultiply 到
+# 纸底 PAPER 后按花括号行 put；4×4 子点/像素抗锯齿。形似简化 Invertocat：圆头 +
+# 双耳三角 + 底三触手剪影（单位几何 0~1，输出 px 见调用方；~12-14 物理px @100%）。
+# 不放 ui.py（那是浮窗渲染域）；本模块自持，缓存按 (master档, px, 墨色)。
+
+_GH_SS = 4                                            # 每像素 4×4 子点（与 ui._SS 同律）
+_GH_CACHE: dict[tuple, tk.PhotoImage] = {}
+
+
+def _gh_shape_cov(x: float, y: float) -> bool:
+    """单位盒 (0~1, y 向下) 任一笔画覆盖判定：圆头∪双耳底触手。
+
+    小尺寸可辨性优先：头圆收小抬高、耳做外尖细长三角（内缘埋进头圆、外缘成
+    轮廓尖角）、触手三桩独立可数（桩间留 0.02 缝隙、与头圆轻搭不断开）。"""
+    # 圆头（Octocat 大头短于宽，占中部）
+    if (x - 0.50) ** 2 + (y - 0.50) ** 2 <= 0.335 ** 2:
+        return True
+    # 双耳：沿 131°/49° 径向外刺的细尖（两底点埋进头圆，不再贴出直边）
+    ears = (((0.185, 0.145), (0.44, 0.30), (0.265, 0.50)),
+            ((0.815, 0.145), (0.56, 0.30), (0.735, 0.50)))
+    for v1, v2, v3 in ears:
+        if _in_tri_uv(x, y, v1, v2, v3):
+            return True
+    # 底触手：三圆桩（中间垂略长），桩间露纸缝、上缘搭进头圆下廓
+    for cx, cy, cr in ((0.32, 0.845, 0.07), (0.50, 0.90, 0.078),
+                       (0.68, 0.845, 0.07)):
+        if (x - cx) ** 2 + (y - cy) ** 2 <= cr * cr:
+            return True
+    return False
+
+
+def _in_tri_uv(x: float, y: float, v1: tuple, v2: tuple, v3: tuple) -> bool:
+    """点 in 三角形（叉积同侧法，含边界；单位坐标版，ui._in_tri 同式）。"""
+    def cr(ax, ay, bx, by):
+        return ax * by - ay * bx
+    d1 = cr(v2[0] - v1[0], v2[1] - v1[1], x - v1[0], y - v1[1])
+    d2 = cr(v3[0] - v2[0], v3[1] - v2[1], x - v2[0], y - v2[1])
+    d3 = cr(v1[0] - v3[0], v1[1] - v3[1], x - v3[0], y - v3[1])
+    return (d1 <= 0 and d2 <= 0 and d3 <= 0) or (d1 >= 0 and d2 >= 0 and d3 >= 0)
+
+
+def gen_gh_mark(px: int, ink: str, bg: str = PAPER, master=None) -> tk.PhotoImage:
+    """GitHub 剪影单色图标：边长 px 物理像素，4×4 子点超采样覆盖 → put。
+
+    ink/bg 为 #RRGGBB；同 (master,px,ink) 命中缓存复用（foot 常亮两档=两张）。
+    """
+    key = (id(master), int(px), ink.lower(), bg.lower())
+    hit = _GH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    p_r, p_g, p_b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
+    i_r, i_g, i_b = (int(ink[i:i + 2], 16) for i in (1, 3, 5))
+    ss, n_sub = _GH_SS, _GH_SS * _GH_SS
+    sub = [(k + 0.5) / ss for k in range(ss)]
+    rows = []
+    for py in range(px):
+        line = []
+        for pxx in range(px):
+            hit_n = 0
+            for sy in sub:
+                uy = (py + sy) / px
+                for sx in sub:
+                    if _gh_shape_cov((pxx + sx) / px, uy):
+                        hit_n += 1
+            f = hit_n / n_sub
+            if f == 0.0:
+                line.append(f"#{p_r:02x}{p_g:02x}{p_b:02x}")
+            elif f == 1.0:
+                line.append(f"#{i_r:02x}{i_g:02x}{i_b:02x}")
+            else:
+                line.append("#%02x%02x%02x" % (
+                    int(p_r + (i_r - p_r) * f + 0.5),
+                    int(p_g + (i_g - p_g) * f + 0.5),
+                    int(p_b + (i_b - p_b) * f + 0.5)))
+        rows.append("{" + " ".join(line) + "}")
+    img = tk.PhotoImage(width=px, height=px, master=master)
+    img.put(" ".join(rows), to=(0, 0, px, px))
+    _GH_CACHE[key] = img
+    return img
+
+
 class SettingsPanel(_Card):
     """设置页：供应商启停 / 网络代理(M8) / 周期 / 阈值 / 置顶 / 自启。改即保存。"""
 
@@ -320,6 +409,20 @@ class SettingsPanel(_Card):
         self.lbl_up_repo = tk.Label(rf, text="", font=app.f_note,
                                     **{**_tk_colors(), "fg": FAINT})
         self.lbl_up_repo.pack(side="left")
+        # ---- M18：下载备用源（仅救二进制；版本信息恒走官方 API，digest 信任锚） ----
+        rf = self.row("镜像源（可选）")
+        rf.pack_configure(pady=1)
+        self.var_mirror = tk.StringVar(value=str(up.get("mirror") or ""))
+        me = tk.Entry(rf, width=30, font=app.f_small, textvariable=self.var_mirror,
+                      bg=ENTRY_BG, fg=INK, insertbackground=INK, relief="flat",
+                      highlightthickness=1, highlightbackground=PAPER_EDGE)
+        me.pack(side="left")
+        me.bind("<Return>", self._save_mirror)
+        me.bind("<FocusOut>", self._save_mirror)
+        self.ent_mirror = me
+        tk.Label(self.body,
+                 text="    仅加速二进制下载，版本信息始终来自 GitHub 官方 API",
+                 font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(anchor="w")
         rf = self.row("检查更新")
         rf.pack_configure(pady=1)
         self.btn_up_check = tk.Button(rf, text="检查更新", font=app.f_small,
@@ -352,17 +455,8 @@ class SettingsPanel(_Card):
                                      cursor="hand2", bg=INK, fg=PAPER,
                                      activebackground="#57503E", relief="flat", bd=0,
                                      padx=14, pady=3, command=self._up_elevate)
-        # ---- M17：一键打开 GitHub 项目页（加星便捷入口；非 star API、零网络请求、
-        #      零凭据接触；slug 空=禁用融纸，同代理组禁用语言） ----
-        rf = self.row("支持")
-        self.btn_star = tk.Button(rf, text="☆ 给本项目加星", font=app.f_small,
-                                  bg=BADGE_BG, fg=INK, activebackground=BADGE_EDGE,
-                                  disabledforeground=FAINT, relief="flat", bd=0,
-                                  padx=12, pady=2, highlightthickness=1,
-                                  highlightbackground=BADGE_EDGE, command=self._up_star)
-        self.btn_star.pack(side="left")
-        tk.Label(rf, text="  在浏览器中打开项目页（本程序不发起任何账号操作）",
-                 font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(side="left")
+        # ---- M18：M17 星形按钮按用户改向删除——开仓页入口移至 foot 行版本签名左侧
+        #      的 GitHub 剪影图标（见 _build foot 段）；orange 兜底语义由 _up_open_repo 保留 ----
         self._up_info = None            # 本轮发现的 UpdateInfo（下载动作的唯一来源）
         self._up_staged = None          # M16：已下载的 new exe 路径（提权重试免二次下载）
         self._up_busy = False
@@ -457,6 +551,20 @@ class SettingsPanel(_Card):
         self.lbl_ver = tk.Label(foot, text=f"v{_version.APP_VERSION} · by Jerry Wu",
                                 font=app.f_note, **{**_tk_colors(), "fg": FAINT})
         self.lbl_ver.pack(side="right")
+        # ---- M18：版本签名左侧 GitHub 剪影图标（用户改向：M17 星形按钮→此入口） ----
+        # 几何：高=f_note 行高（~13px@100%，DPI 自适应），宽等高保比例；
+        # 与 lbl_ver 间距 ~6px；side=right 后 pack 者居左 → 「[icon] v… · by Jerry Wu」。
+        # slug 空 → 隐藏零占位（foot 布局回原样）；hover 墨档 FAINT→SOFT。
+        self._gh_px = max(12, int(round(app.f_note.metrics("linespace"))))
+        self._gh_imgs: dict[str, tk.PhotoImage] = {}
+        self._gh_packed = False
+        self.lbl_gh = tk.Label(foot, bg=PAPER, cursor="hand2", bd=0,
+                               highlightthickness=0)
+        self.lbl_gh.bind("<Button-1>", lambda e: self._up_open_repo())
+        self.lbl_gh.bind("<Enter>", self._gh_enter)
+        self.lbl_gh.bind("<Leave>", self._gh_leave)
+        self._gh_tipw: tk.Toplevel | None = None
+        self._up_sync_gh_icon()
         self.finish()
 
     # ================= 回调 =================
@@ -593,25 +701,93 @@ class SettingsPanel(_Card):
         self._up_sync_repo_label()
         self._say("自动更新已" + ("开启" if sec["enabled"] else "关闭"))
 
+    def _save_mirror(self, event=None) -> None:
+        """镜像源粘贴即存：normalize 后回写 Entry（所见=所存）；空=不使用。"""
+        raw = self.var_mirror.get().strip()
+        norm = updater.normalize_mirror(raw)
+        if self.var_mirror.get() != norm:
+            self.var_mirror.set(norm)
+        sec = _section(self.app, "update")
+        if sec.get("mirror", "") == norm and raw == norm:
+            return                                    # 无变化不打扰（FocusOut 高频）
+        sec["mirror"] = norm
+        self.app.cfg["update"] = sec
+        self.app.save_cfg()
+        if raw and not norm:
+            self._say("镜像地址不合法，已按「不使用」处理（如 https://ghfast.top/）", RED)
+        elif norm:
+            self._say(f"镜像源 → {norm}（仅下载备用链）", OK)
+        else:
+            self._say("镜像源已清空：仅直连/代理", OK)
+
     def _up_sync_repo_label(self) -> None:
         sec = _section(self.app, "update")
         slug = updater.parse_repo(sec.get("repo"))
         self.lbl_up_repo.configure(
             text=f"  源 GitHub Releases · {slug}" if slug else "  源未配置（update.repo）")
-        # M17：slug 空 → 星按钮禁用融纸（与「测试连通」禁用语言同律）
-        btn = getattr(self, "btn_star", None)
-        if btn is not None:
-            if slug:
-                btn.configure(state="normal", bg=BADGE_BG, cursor="hand2",
-                              highlightthickness=1, highlightbackground=BADGE_EDGE)
-            else:
-                btn.configure(state="disabled", bg=PAPER, cursor="arrow",
-                              highlightthickness=0)
+        # M18：星形按钮已删（用户改向）——slug 空 → foot GitHub 图标隐藏零占位
+        self._up_sync_gh_icon()
 
-    def _up_star(self) -> None:
-        """M17：默认浏览器打开 GitHub 项目页（加星在页面完成；本程序零 API/零凭据）。
+    # ---- M18：foot GitHub 图标（渲染/隐藏/hover/tooltip/点击开仓页） ----
 
-        拉起失败（无默认浏览器等）→ 状态行橙字一句指路手动访问。"""
+    def _up_sync_gh_icon(self) -> None:
+        if not hasattr(self, "lbl_gh"):               # 更新组先于 foot 构建（构造序守卫）
+            return
+        slug = updater.parse_repo(_section(self.app, "update").get("repo"))
+        if slug:
+            self._gh_set(FAINT)
+            if not self._gh_packed:
+                self.lbl_gh.pack(side="right", padx=(0, 6))
+                self._gh_packed = True
+        else:
+            self._gh_tip(False)
+            self.lbl_gh.pack_forget()
+            self._gh_packed = False
+
+    def _gh_img(self, ink: str) -> tk.PhotoImage:
+        img = self._gh_imgs.get(ink)
+        if img is None:
+            img = gen_gh_mark(self._gh_px, ink, bg=PAPER, master=self)
+            self._gh_imgs[ink] = img                  # 持引用防 PhotoImage GC
+        return img
+
+    def _gh_set(self, ink: str) -> None:
+        try:
+            self.lbl_gh.configure(image=self._gh_img(ink))
+        except tk.TclError:
+            pass
+
+    def _gh_enter(self, _e=None) -> None:
+        self._gh_set(SOFT)
+        self._gh_tip(True)
+
+    def _gh_leave(self, _e=None) -> None:
+        self._gh_set(FAINT)
+        self._gh_tip(False)
+
+    def _gh_tip(self, show: bool) -> None:
+        """迷你 tooltip（foot 图标专用；主窗 _tip 语言同款色档）。"""
+        if show:
+            if self._gh_tipw is None or not self._gh_tipw.winfo_exists():
+                self._gh_tipw = tk.Toplevel(self)
+                self._gh_tipw.overrideredirect(True)
+                self._gh_tipw.attributes("-topmost", True)
+                tk.Label(self._gh_tipw, text="打开 GitHub 仓库页", bg=TIP_BG, fg=TIP_FG,
+                         font=self.app.f_tiny, padx=6, pady=3).pack()
+            self._gh_tipw.update_idletasks()
+            x = self.lbl_gh.winfo_rootx() - 4
+            y = max(0, self.lbl_gh.winfo_rooty() - self._gh_tipw.winfo_reqheight() - 4)
+            self._gh_tipw.geometry(f"+{x}+{y}")
+            self._gh_tipw.deiconify()
+            self._gh_tipw.lift()
+        elif self._gh_tipw is not None and self._gh_tipw.winfo_exists():
+            self._gh_tipw.withdraw()
+
+    def _up_open_repo(self) -> None:
+        """M18：foot GitHub 图标 → 默认浏览器开项目页（M17 星按钮改向；零 API/零凭据）。
+
+        拉起失败（无默认浏览器等）→ 状态行橙字一句指路手动访问（兜底同 M17）。"""
+        self._gh_tip(False)
         url = updater.repo_url(_section(self.app, "update").get("repo"))
         if not url:
             return
@@ -620,7 +796,7 @@ class SettingsPanel(_Card):
         except Exception:                             # noqa: BLE001 webbrowser 解析失败兜底
             ok = False
         if not ok:
-            self.lbl_up.configure(text=f"未能拉起浏览器：请手动访问 {url} 加星",
+            self.lbl_up.configure(text=f"未能拉起浏览器：请手动访问 {url}",
                                   fg=ORANGE)
 
     def _up_refresh(self, manual: bool) -> None:
@@ -664,6 +840,8 @@ class SettingsPanel(_Card):
                     self._up_show_check(res, manual)
                 elif item[0] == "dl":
                     self._up_show_dl(item[1])
+                elif item[0] == "info":                   # M18：通道审计一行（临时态）
+                    self.lbl_up.configure(text=item[1], fg=SOFT_TXT)
         except queue.Empty:
             pass
         self.after(150, self._up_poll)
@@ -752,12 +930,18 @@ class SettingsPanel(_Card):
 
     def _up_worker_apply(self, url: str) -> None:
         try:
-            path, err = updater.download_and_stage(url)
-            if err:
-                self._up_q.put(("dl", err))
+            dig = self._up_info.digest if self._up_info is not None else None
+            res = updater.download_and_stage(url, cfg=self.app.cfg, digest=dig)
+            if res.err:
+                self._up_q.put(("dl", res.err))
                 return
-            self._up_staged = path                     # M16：暂存供「提权更新」免重下
-            err = updater.apply_update_and_restart(path)   # 成功=不返回（exit）
+            # M18：非默认通道/未校验放行 → 状态行补一句通道审计（apply 随即退出）
+            if res.channel != "direct" or res.note:
+                word = {"proxy": "经代理", "mirror": "经镜像源"}.get(res.channel, "直连")
+                self._up_q.put(("info", "下载完成（" + word + "）"
+                                     + (f"：{res.note}" if res.note else "")))
+            self._up_staged = res.path               # M16：暂存供「提权更新」免重下
+            err = updater.apply_update_and_restart(res.path)   # 成功=不返回（exit）
             self._up_q.put(("dl", err or "更新脚本已就位但未能退出"))
         except Exception as e:                            # noqa: BLE001
             self._up_q.put(("dl", f"更新异常：{type(e).__name__}"))

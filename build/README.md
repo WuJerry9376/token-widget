@@ -123,6 +123,18 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-18 v1.8.0 换装（M18 / fixer：foot GitHub 图标（M17 星钮改向，超采样剪影）+
+  更新镜像备用源（直连→代理→镜像回退链）+ SHA-256 信任锚（asset.digest 强校验、镜像缺
+  哈希拒收、元数据恒官方 API））**：双源升版 version.py + version_info.txt（看门 PASS）；
+  门禁 10 套 **167/167 全绿**（M15 套 29→31）；重建 **10.8 MB / 8.3s**，PE 通过，属性
+  1.8.0（UTF-8 复核）。GBK console 冒烟 exit=0、stderr 0B，证据行 `轮询完成:
+  bailian=LOGIN_EXPIRED | codex=KEY_INVALID | 下轮 600s`（dev 机凭据过期橙态预期、
+  无 openai ✓），验毕 console 已删。守卫四件（config/state/cookie/auth.json）
+  COPIED(new)+哈希一致、openai 残留复净 ✓；foot 图标 10× 取证 `python
+  tests\capture_m18.py` → **M18 CAPTURE: PASS**，`local\m18_ghicon.png`（上=常态
+  FAINT、下=hover SOFT 双态合成）。注：本轮 build.ps1 清 dist 两次（console 变体重建
+  所致）→ dist\local 于最终次构建后重布，冒烟/常驻均跑在布置后形态。收口：git commit +
+  tag v1.8.0 + push + `gh release create v1.8.0 dist\TokenWidget.exe`。
 - **2026-09-16 v1.6.6 换装（M14 / des-3：Codex 5h/周双等尺寸主条对称信息块、组间距
   12 逻辑px、行高 114→100、ui_rows 双主条断言组重写）**：双源升版 version.py +
   version_info.txt（看门 PASS）；门禁 9 套 **136/136 全绿**；重建 **10.7 MB /
