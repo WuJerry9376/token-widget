@@ -24,7 +24,7 @@ A Windows sticky-note widget that keeps your LLM subscription quotas on the desk
 2. Double-click it. The note appears on your desktop and creates a `local\` folder beside the exe for config and data.
 3. Right-click the note → Settings, tick the providers you use and bind their credentials (Bailian cookie / Go key / Codex token — step-by-step guides in the Appendix below).
 
-> Windows SmartScreen may warn about an unsigned single-file build: *More info → Run anyway*. Local Defender scans in our testing report zero detections.
+> Windows SmartScreen may warn about an unsigned single-file build: *More info → Run anyway*. Local Defender scans in our testing report zero detections. Scans by other antivirus vendors may differ.
 
 ## Screenshots
 
@@ -55,7 +55,7 @@ pwsh -File build\build.ps1        # one-shot PyInstaller build (~20 s → dist\T
 python cli.py                     # console view of the same collected data
 ```
 
-## Disclaimer (read this before trusting it)
+## Disclaimer & known limitations
 
 - **Bailian** has no official quota API. This tool reads the console's undocumented read-only usage endpoint — the same path several open-source monitors take. Cookies expire and must be re-pasted; upstream changes can break collection at any time.
 - **Codex** plan windows are read through a community-known, non-official ChatGPT backend endpoint. It is labelled *experimental* in the UI, disabled by default, and may stop working whenever OpenAI changes it.
@@ -151,7 +151,7 @@ python cli.py                     # console view of the same collected data
 - 更新源=GitHub Releases 最新 release 的 `TokenWidget.exe`；仓库默认 `WuJerry9376/token-widget`（已内置配置 DEFAULTS，可在 `local\config.json` 的 `update.repo` 覆盖，置空=未配置零网络）。github api 默认直连（proxy_targets 不含 update），直连失败且代理开启时自动经代理重试一次。
 - **发现新版=专属弹窗确认（M19）**：手动点「检查更新」（或点橙点进设置页触发）发现新版 → 自动弹出确认窗：当前版本→新版本、发布时间、包大小、发行说明（≤6 行），底部「立即更新」/「取消」。点「立即更新」直接开始下载替换（弹窗即确认，无二次询问），窗内实时显示下载百分比与校验状态；失败给橙字原因+「重试」「关闭」，目录不可写时出「提权更新」（一次 UAC）。弹窗被取消后设置页状态行保留「发现新版 vY」+「查看」可随时重开。**定时/启动路径发现只亮橙点、不弹窗**（防打扰）。
 - **镜像备用源（M18）**：设置页「镜像源（可选）」粘贴即用（如 `ghfast.top` 或 `https://ghfast.top/`，也兼容 `https://ghfast.top/https://…` 占位式——两者都规范化为「前缀+原URL」拼接存储）。下载回退链=**直连 → 代理（开启时）→ 镜像**，成功通道在状态行标注。**版本信息（检查/哈希）始终只走 GitHub 官方 API，镜像永不参与元数据**。注意：镜像是第三方服务，可读到你下载的字节，但有官方 API 下发的 SHA-256 哈希把关——`asset.digest` 存在则**必校验**（不符即删报错；镜像腿缺哈希直接拒收，直连/代理腿缺哈希放行并在状态说明）。
-- **版本近况（v1.8.1，交互修复）**：发现新版改为专属弹窗确认（见上），内联「立即下载并更新」按钮退役（可发现性差，v1.7.1 用户反馈）。v1.8.0：设置页 foot 新增 GitHub 剪影图标（一键开仓库页，零 API/零凭据；未配置仓库时隐藏）；更新链加入镜像备用源 + SHA-256 完整性校验（信任锚=官方 API）。v1.7.2：频控命中状态行精简为「上次检查：HH:MM」。完整迭代记录见 [Releases](https://github.com/WuJerry9376/token-widget/releases)。
+- **版本近况（v1.8.2，当前发布版）**：设置页 foot 图标换 **官方 GitHub Invertocat 素材**（FAINT/SOFT 两态烘焙纸底、DPI 四档自适应、随 exe 打包，零运行时依赖）。v1.8.1（交互修复）：发现新版改为专属弹窗确认，内联「立即下载并更新」按钮退役（可发现性差，v1.7.1 用户反馈）。v1.8.0：设置页 foot 新增 GitHub 图标（一键开仓库页，零 API/零凭据；未配置仓库时隐藏）；更新链加入镜像备用源 + SHA-256 完整性校验（信任锚=官方 API）。v1.7.2：频控命中状态行精简为「上次检查：HH:MM」。**完整版本历史以 [Releases 页](https://github.com/WuJerry9376/token-widget/releases) 为准。**
 - **安全设计：定时路径只读发现、绝不自动下载**——下载与替换只在用户于确认弹窗点「立即更新」后发生；替换经一次性脚本在程序退出后完成（旧 exe 改名→新 exe 就位→自启→清理），`local\` 下凭据与设置零触碰。
 
 ### A7 移植到其他电脑
@@ -159,7 +159,7 @@ python cli.py                     # console view of the same collected data
 1. **只拷 `TokenWidget.exe` 一个文件**（目标机需 Windows 10/11 x64，免装 Python）。可选再拷 `local\config.json` 带走偏好；**不要拷 `bailian_cookie.dpapi`**——DPAPI 凭据与本机本用户绑定，异机必然解密失败（程序会安全降级为"需重新登录凭据"引导，不会崩）
 2. 双击运行，首次启动自动在 exe 旁创建 `local\`；百炼行显示橙色"需重新登录凭据…"
 3. 点该行胶囊 → 在**这台目标机的浏览器**登录 `bailian.console.aliyun.com` → F12 网络 → 任选一条发往 `bailian-cs` 的请求 → 复制完整 `Cookie` 粘贴保存（本机 DPAPI 重新加密）
-4. 被 SmartScreen/杀软拦时：属性→解除锁定，或加白名单（未签名单文件打包的常见误报；本机 Defender 实测 0 检出）
+4. 被 SmartScreen/杀软拦时：属性→解除锁定，或加白名单（未签名单文件打包的常见误报；本机 Defender 实测 0 检出；其他杀软厂商结果可能不同）
 5. 开机自启按需在设置页开启（写当前用户 HKCU，逐台各自设置）；多屏拖动位置自动记忆
 6. 多台机器可同时跑同一账户（只读低频轮询互不冲突）；任一台上重新登录阿里云可能使旧 Cookie 失效，届时该机按提示重贴即可
 

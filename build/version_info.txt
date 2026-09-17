@@ -3,8 +3,8 @@
 # 语言 0x0804 (zh-CN) / 码页 0x04b0 (1200, UTF-16)。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 8, 1, 0),
-    prodvers=(1, 8, 1, 0),
+    filevers=(1, 8, 2, 0),
+    prodvers=(1, 8, 2, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
       StringTable('080404b0', [
         StringStruct('CompanyName', ''),
         StringStruct('FileDescription', 'LLM API 额度桌面浮窗'),
-        StringStruct('FileVersion', '1.8.1'),
+        StringStruct('FileVersion', '1.8.2'),
         StringStruct('InternalName', 'TokenWidget'),
         StringStruct('LegalCopyright', ''),
         StringStruct('OriginalFilename', 'TokenWidget.exe'),
         StringStruct('ProductName', 'Token 余量浮窗'),
-        StringStruct('ProductVersion', '1.8.1'),
+        StringStruct('ProductVersion', '1.8.2'),
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])]),

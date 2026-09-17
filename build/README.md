@@ -123,6 +123,21 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-19 v1.8.2 换装（M21+M20 门面波次 / 打包线：foot 图标官方 Invertocat 资产化 +
+  README 双语门面文案修订）**：M21 素材轮 commit `68323ea`（assets×8 烘焙 PNG、
+  tools/make_gh_assets.py、spec datas、u26 改造+自绘禁回流，14 文件）；双源升版 1.8.2
+  （看门 PASS）；门禁 10 套 **169/169**；重建 **10.8 MB / 20.6s**，PE 通过，属性 1.8.2。
+  **frozen 资产实证（本轮新判据）**：windowed 正式版 `--open-settings` 起设置面板，
+  EnumWindows 定位 442×606 窗裁 foot 带——FAINT 系墨=242/8400、图标列带在文字左侧
+  实渲，存证 `local\m21_frozen_foot.png` PASS、进程 25s 自退 exit=0；⚠️ **发现：
+  build.ps1 的 console 变体走裸 PyInstaller 命令（不经 spec）→ 不含 assets，frozen
+  探针首跑（v1 console）图标隐藏即此因**——交付形态不受影响，后续如要 console 也带
+  素材需给该分支补 `--add-data "assets;assets"`（未列入本轮改动）。GBK 冒烟：
+  windowed 常驻双进程 responding=True、注册表 **IDENTICAL**、**MpCmdRun 0 检出**、
+  守卫四件哈希一致（探针 last_check 落盘后复布）、console exe 已删。README 文案三处：
+  EN Disclaimer 标题→「Disclaimer & known limitations」、SmartScreen 注记补
+  「Scans by other antivirus vendors may differ./其他杀软厂商结果可能不同」、A6 版本
+  近况→v1.8.2+Releases 外链。收口：commit + tag v1.8.2 + push + `gh release create`。
 - **2026-09-19 v1.8.1 换装（M19 / fixer：发现新版改专属弹窗确认 UpdateDialog，内联
   「立即下载并更新」组退役；updater 元数据扩 size/published_at + progress_cb 节流）**：
   双源升版（看门 PASS）；门禁 10 套 **169/169 全绿**（M15 套 31→33：u21 弹窗改造/
