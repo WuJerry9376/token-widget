@@ -123,6 +123,19 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-16 v1.6.6 换装（M14 / des-3：Codex 5h/周双等尺寸主条对称信息块、组间距
+  12 逻辑px、行高 114→100、ui_rows 双主条断言组重写）**：双源升版 version.py +
+  version_info.txt（看门 PASS）；门禁 9 套 **136/136 全绿**；重建 **10.7 MB /
+  22.3s**，PE 通过，属性 1.6.6（UTF-8 复核）。GBK console 冒烟 exit=0、stderr
+  0B，证据行 `轮询完成: bailian=LOGIN_EXPIRED | codex=KEY_INVALID | 下轮 600s`——
+  ⚠️ **两行橙态系 dev 机凭据过期（Codex OAuth 401 / Cookie 过期），属数据状态非
+  回归；生产机凭据为新，不受影响**。windowed 常驻双进程落位 (2004,24)，全窗高
+  实测 **192px**（含双因：行高 114→100 净降 + KEY_INVALID 橙态无 codex 数据块；
+  正常态 M14 全窗高以 ui_rows 断言组为准），截图 `local\m14_ship_state.png` 目检
+  两行橙档渲染、↻ 在位无异常；HKCU Run **IDENTICAL**；**MpCmdRun 0 检出**；
+  console 已删、0 孤儿、0 WER、cookie 基线不变；守卫四件哈希一致、openai 残留
+  复净 ✓；dist = exe + local 四件。收口：git commit + tag v1.6.6，禁提交物扫描
+  为空。
 - **2026-09-15 v1.6.5 换装（M13 / des-5：`src/version.py` 单一版本源
   APP_VERSION、设置面板 foot 行右端 `v{APP_VERSION} · by Jerry Wu` FAINT 档零增高、
   同步看门入 test_settings）**：本轮曾于门禁步**正确中止一次**——168 行过时静态

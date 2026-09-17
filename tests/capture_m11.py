@@ -28,8 +28,8 @@ from src.state import DEFAULTS                                  # noqa: E402
 from src.ui import ROW_5H, NoteApp, codex_bars, codex_ticket_count, codex_win_caption  # noqa: E402
 import main as main_mod                                         # noqa: E402
 
-OUT_FULL = ROOT / "local" / "m11_window.png"
-OUT_ROW = ROOT / "local" / "m11_codex_row.png"
+OUT_FULL = ROOT / "local" / "m14_window.png"
+OUT_ROW = ROOT / "local" / "m14_codex_dual.png"
 WAIT_SECONDS = 40.0          # 与 --quit-after 40 同预算
 
 
@@ -111,7 +111,8 @@ def run() -> int:
               if app.canvas.type(i) == "text"]
         joined = " | ".join(ts)
         ok_txt = ("Codex" in joined and f"{codex_win_caption(main_bar.label)} · 已用" in joined
-                  and (("周" in ts or "5h" in ts) if sec_bar else True))
+                  and (sec_bar is None
+                       or f"{codex_win_caption(sec_bar.label)} · 已用" in joined))
         ntk = codex_ticket_count(cx)
         ok_txt = ok_txt and ((f"券×{ntk}" in ts) if ntk else
                              not any(t.startswith("券×") for t in ts))

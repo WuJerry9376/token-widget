@@ -42,7 +42,8 @@ from src.sources import codex as cx                                             
 from src.sources import opencode_go as og                                         # noqa: E402
 from src.sources.base import Usage, Window                                        # noqa: E402
 from src.state import DEFAULTS                                                    # noqa: E402
-from src.ui import (OK, ORANGE, ROW_ADDON, SOFT, SOFT_TXT, NoteApp,   # noqa: E402
+from src.ui import (CODEX_GAP, CODEX_TEXT_Y, CODEX_TXT_BAR, OK, ORANGE, ROW_ADDON,
+                    SOFT, SOFT_TXT, NoteApp,                                   # noqa: E402
                     spec_display, _tip_credits, addon_bar_state, codex_bars,
                     codex_ticket_count, codex_win_caption)
 import main as main_mod                                                           # noqa: E402
@@ -570,7 +571,7 @@ def _rect_fills(app, fill_hex) -> list[tuple[float, ...]]:
 
 
 def p3_ui_rows_tooltip(app, root) -> str:
-    # ============ M11b 双条形态：主条=最紧已知窗 + 副细条=另一已知窗 ============
+    # ===== M14 双主条形态：5h/周各一块「文字行+等尺寸条」，固定槽（M11d）上 5h 下 周 =====
     u = u_ok_codex()                                   # [5h .62, 周 .30]，无 note
     feed(app, u)
     labels = texts_join(app)
@@ -578,25 +579,36 @@ def p3_ui_rows_tooltip(app, root) -> str:
     assert "Codex" in labels, labels                   # NAMES 行名
     assert "PLUS" in labels, "spec 徽章大写化：" + labels
     assert "38%" in labels, "大数字=剩余占比(1-最紧窗 62%)"
-    # 主条行（M11d① 固定槽+② 5h 去「窗」：「5h · 已用 x%」）
+    # 块1（5h 主条，M11d① 固定槽+② 去「窗」）：「5h · 已用 x%」+右侧粗体倒计时
     assert "5h · 已用 62.0%" in labels, labels
-    assert "窗口 · 已用" not in labels, "codex 行不得再有「X 窗口 · 已用」旧拼接"
-    # 副细条行：label「周」独立 text + 右端「已用 x% · 倒计时」同向图文（M11c③ 方向锚）
-    assert "周" in items, items
-    strip_txt = [t for t in items if t.startswith("已用 30.0% · ") and "后重置" in t]
-    assert strip_txt, "副条缺倒计时文案：" + labels
-    t, tfill = next((tt, fl) for tt, fl in text_items(app)
-                    if str(tt).startswith("已用 30.0% · "))
-    assert tfill == SOFT_TXT.lower(), (tfill, "尾注整句浅灰（M11c①）")
-    strip_item = next(i for i in app.canvas.find_all()
-                      if app.canvas.type(i) == "text"
-                      and str(app.canvas.itemcget(i, "text")).startswith("已用 30.0% · "))
-    ffont = str(app.canvas.itemcget(strip_item, "font"))
-    assert ffont == str(app.f_note) and ffont != str(app.f_tiny), \
-        "尾注字档=f_note 常规（M11c①，整句统一非常规数字+重 CJK）"
-    assert not any("周 窗口 · 已用" in t for t in items), "旧副显文本行应已被细条取代"
+    assert not any(t.startswith(("5h 窗口", "周 窗口")) for t in items), \
+        "codex 行不得再有「X 窗口 · 已用」旧拼接"
+    # 块2（M14 周升等尺寸主条）：完全对称的「周窗 · 已用 x%」+独立倒计时
+    assert "周窗 · 已用 30.0%" in labels, labels
+    cds = [t for t in items if t.endswith("后重置")]
+    assert len(cds) == 2, f"两窗各一条倒计时：{cds}"
+    # 图文语法对称：两文字行同字档（f_tiny），两倒计时同粗档（f_small_b）——
+    # 周不再是副显（旧细条 f_note 尾注字档随 M14 退场）
+    c = app.canvas
+    def font_of(txt_start):
+        it = next(i for i in c.find_all() if c.type(i) == "text"
+                  and str(c.itemcget(i, "text")).startswith(txt_start))
+        return str(c.itemcget(it, "font"))
+    assert font_of("5h · 已用") == font_of("周窗 · 已用") == str(app.f_tiny), "左文字行同档"
+    assert all(font_of(x) == str(app.f_small_b) for x in cds), "倒计时同为粗档"
+    # 双主条等尺寸与间距（M14）：轨道 bbox 高差 ≤1px；行距 pitch=28、条-条空隙=19
+    # （空隙 = CODEX_TXT_BAR(7 文→条) + CODEX_GAP(12 条底→下块文) = 19，远大于旧细条 2.6）
+    tracks = sorted(_rect_fills(app, "#e3d3a9"), key=lambda b: b[1])
+    assert len(tracks) == 2, tracks
+    assert abs((tracks[0][3] - tracks[0][1]) - (tracks[1][3] - tracks[1][1])) <= 1.0, \
+        "两主条等高（同高同圆角同空轨语言）"
+    pitch = tracks[1][1] - tracks[0][1]
+    assert abs(pitch - 28 * app.S) <= 2.0, f"块行距 pitch={pitch:.1f} 应≈28·S"
+    bar_gap = tracks[1][1] - tracks[0][3]
+    assert abs(bar_gap - (CODEX_TXT_BAR + CODEX_GAP) * app.S) <= 2.0, \
+        f"条-条空隙 {bar_gap:.1f} 应=(7+12)·S−2 容差"
     # 两根条并存：绿色填充（5h .62→剩38%、周 .30→剩70% 均正常档）恰 2 根
-    assert len(_rect_fills(app, "#3bc371")) == 2, "主条+副条各一根（各窗独立阈值着色）"
+    assert len(_rect_fills(app, "#3bc371")) == 2, "两根主条（各窗独立阈值着色）"
     h2w = float(app.canvas.cget("height"))
     # —— other:N 行内不显（tooltip 仍全列），且不占高度 ——
     uo = u_ok_codex(windows=[Window("5h", 0.62, _NOW + timedelta(hours=2, minutes=1)),
@@ -612,28 +624,34 @@ def p3_ui_rows_tooltip(app, root) -> str:
                              Window("周", 0.96, _NOW + timedelta(days=4))])
     feed(app, uc)
     assert len(_rect_fills(app, "#3bc371")) == 1, "5h 主条应仍绿"
-    assert len(_rect_fills(app, "#ef0000")) == 1, "周副条应红（剩 4%<5%）"
-    # —— M11d① 固定槽：周更紧时 5h 仍在主条、周落副细条（与松紧解耦）——
+    assert len(_rect_fills(app, "#ef0000")) == 1, "周主条应红（剩 4%<5%，各窗独立判）"
+    # —— M11d① 固定槽：周更紧时 5h 仍是块1（上）、周恒块2（下）——几何序锁 ——
     ut = u_ok_codex(pct_used=0.80,
                     windows=[Window("周", 0.80, _NOW + timedelta(days=4)),
                              Window("5h", 0.62, _NOW + timedelta(hours=2, minutes=1))])
     feed(app, ut)
     tl = texts_join(app)
-    assert "5h · 已用 62.0%" in tl, "固定槽：5h 恒主条（即便周更紧）"
-    assert any(t.startswith("已用 80.0% · ") for t in
-               [str(x) for x, _ in text_items(app)]), "周恒副细条"
-    assert "周窗 · 已用 80.0%" not in tl, "周不得升上主条（5h 在场）"
+    assert "5h · 已用 62.0%" in tl, "固定槽：5h 恒块1（即便周更紧）"
+    assert "周窗 · 已用 80.0%" in tl, "周恒块2（等尺寸主条块，非副显）"
+    cv = app.canvas
+
+    def top_of(txt_start):
+        return min(cv.bbox(i)[1] for i in cv.find_all()
+                   if cv.type(i) == "text"
+                   and str(cv.itemcget(i, "text")).startswith(txt_start))
+
+    assert top_of("5h · 已用") < top_of("周窗 · 已用"), "槽序：5h 上、周 下"
     assert "38%" in tl and "20%" not in tl, "大数字随主条窗(5h剩38%)非最紧窗(周剩20%)"
-    # —— 单窗：仅主条，零副条占位；两窗-单窗 = ROW_ADDON·S ——
+    # —— 单窗：仅一块；M14 双窗与单窗等高（第二条落在旧细条+C 行空档）——
     u1 = u_ok_codex(windows=[Window("周", 0.30, _NOW + timedelta(days=4))])
     feed(app, u1)
     h1w = float(app.canvas.cget("height"))
-    assert "周窗 · 已用 30.0%" in texts_join(app), "缺 5h：周升主条（递补）"
+    assert "周窗 · 已用 30.0%" in texts_join(app), "缺 5h：周升块1（递补）"
     u5 = u_ok_codex(windows=[Window("5h", 0.62, _NOW + timedelta(hours=2))])
     feed(app, u5)
     assert "5h · 已用 62.0%" in texts_join(app)
-    assert float(app.canvas.cget("height")) == h1w, "无周：5h 留主条，行高同单边"
-    assert abs((h2w - h1w) - ROW_ADDON * app.S) <= 2.0, (h1w, h2w)
+    assert float(app.canvas.cget("height")) == h1w, "无周：5h 留块1，行高同单边"
+    assert h2w == h1w, (h1w, h2w, "M14：两窗/单窗等高（ROW_FULL=100 内收双条）")
     # ============ 重置券角标：有券显「券×N」，无券零占位（高度不变） ============
     feed(app, u)                                        # 无 note 基线
     assert not any(t.startswith("券×") for t in
@@ -713,8 +731,8 @@ def p3_ui_rows_tooltip(app, root) -> str:
     assert codex_win_caption("周") == "周窗" and codex_win_caption("5h") == "5h", \
         "M11d②：5h 去「窗」"
     assert codex_win_caption("周窗") == "周窗", "短名幂等"
-    return "M11b/c 双条(主条最紧/副细条/独立阈值色/other不显/窗短名/尾注f_note浅灰/"\
-           "券SOFT同档+方向锚「已用/剩」)+角标零占位+错误行+纯函数 全中"
+    return "M14 双等尺寸主条（块对称/等高/条-条19·S/独立阈值色/other不显/固定槽序/"\
+           "单双窗等高）+券SOFT角标零占位+错误行+纯函数 全中"
 
 
 def p4_bailian_untouched(app, root) -> str:

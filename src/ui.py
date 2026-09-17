@@ -23,6 +23,11 @@
   右「已用 x% · 倒计时」图文同向）；条填充=已用向，阈值色各窗独立判定；
   other:N 未知窗行内不显（tooltip 仍全列）；重置券角标「券×N」（note 解析）画在
   A 行徽章位、零高度、无券完全不占位，hover=说明性 tooltip（无点击动作）。
+  （M14 起副细条已升等尺寸主条，下方 M14 条目为准。）
+- M14 Codex 双主条等尺寸：5h/周各自「文字行（短名·已用% ｜ 倒计时粗体）+ 9px 主条」
+  两信息块完全对称；组内文→条 7px（与百炼 B 行同律），组间行距 CODEX_GAP=12px
+  （条-条实距 19px；1.7× 组内，Gestalt 亲近性分组清晰）；整组收在 ROW_FULL=100 内
+  （原细条方案 114 → 100，第二条借用旧细条+C 行空档，行高零增）。
 - M11d 固定槽与去「窗」：主条恒=5h、副细条恒=周（与松紧解耦，缺位递补：无 5h 周升
   主条、无周仅主条）；5h 短名去「窗」→「5h · 已用 x%」（周维持「周窗」）；
   大数字口径随主条窗剩余占比（所见即所得），黄/红仍各窗独立判（副条自着色兜紧迫度）。
@@ -98,6 +103,9 @@ ROW_5H = 16              # 5h 副行增量
 ROW_ADDON = 14           # M7-a 加油包细条增量（条 5.4px ≈ 主条 9px 的 60%）
 ROW_CRED = 16            # 凭据警示行增量
 ROW_ERR = 58             # 纯错误行高
+CODEX_TEXT_Y = 53        # M14 codex 块1 文字行基线位（沿用旧 B 行 53/60 语法）
+CODEX_TXT_BAR = 7        # 组内：文字行中心 → 条顶（与百炼 B 行→条同律）
+CODEX_GAP = 12           # M14 组间距：条1底 → 块2文字行中心（条-条实距 = 12+7 = 19px）
 
 NAMES = {"bailian": "百炼", "opencode_go": "OpenCode Go",
          "codex": "Codex"}
@@ -1180,8 +1188,8 @@ class NoteApp:
         u = info["u"]
         if u.provider == "codex":
             main, sec = codex_bars(u)
-            if main is not None:                   # M11b 双条布局：主条行 + 副细条槽
-                h = ROW_FULL + (ROW_ADDON if sec is not None else 0)
+            if main is not None:                   # M14 双主条：两信息块收进 ROW_FULL 内
+                h = ROW_FULL
                 if info["cred"] or info["stale"]:
                     h += ROW_CRED
                 return h
@@ -1526,52 +1534,39 @@ class NoteApp:
     def _draw_codex_bars(self, top: float, info: dict, u: Usage,
                          main: Window, sec: Window | None,
                          m: float, right: float, stale: bool) -> float:
-        """M11b codex 行主体：主条+副细条（M11d① 固定槽：5h 恒上、周恒下，缺位递补）。
+        """M14 codex 行主体：两根等尺寸主条信息块（文字行+9px 条），M11d① 固定槽不变。
 
-        槽位语法与百炼「主条+加油包细条」完全同源（B 行 53/60，细条 72/高 5.4，
-        行高增量 ROW_ADDON）；两根条都是 填充=已用向、阈值色按**各自窗** pct 独立
-        判定（_bar_color），图文同向不反转。大数字=主条窗剩余（M11d 所见即所得）。
-        M11c③ 定案：主条一律已用向；细条一律「右文案=方向锚字」——codex 副细条
-        「已用 x%」已用向、加油包细条「剩 X / Y」剩余向，两者几何同色异向不再混读。
+        5h/周两窗完全对称：各自「{短名} · 已用 x%（左，f_tiny）＋ 倒计时（右，粗档）」
+        文字行下随一根与百炼主条同高同圆角同空轨语言的 9px 条；组内 文字→条 7px，
+        组间 12px（条-条 19px）。阈值色按**各自窗** pct 独立判（_bar_color），
+        填充=已用向，图文自洽无需锚字（M11c③ 纪律在双主条下自然成立）。
+        整组（双窗）底缘 y+97 < ROW_FULL=100：第二条借用旧细条+C 行空档，行高不增。
         """
-        c, P = self.canvas, self._p
+        P = self._p
         y = top
         c_name = INK if not stale else SOFT
         c_soft = SOFT_TXT if not stale else FAINT
-        # 主条行：窗短名直出（5h / 周窗，M11c①+M11d②）；无「按周期计」口径注（codex 无加油包分母）
-        pct = main.pct_used
-        cap = codex_win_caption(main.label)
-        txt = (f"{cap} · 已用 {pct:.1%}" if pct is not None
-               else f"{cap} · 暂无百分比")
-        c.create_text(m, P(y + 53), anchor="w", font=self.f_tiny, fill=c_soft,
-                      text=txt)
-        c.create_text(right, P(y + 53), anchor="e", font=self.f_small_b,
-                      fill=c_name, text=fmt_countdown(main.resets_at))
-        self._bar(m, P(y + 60), right - m, P(9), pct,
-                  STALE if stale else self._bar_color(pct))
-        # 副细条行：另一已知窗（无则零占位——单窗套餐行高与通用单窗行相等）。
-        # M11c③ 方向锚定案：右文案自带「已用」前缀、条长=已用向，图文同向不反转
-        # （与加油包细条「剩 X / Y」剩余向相对——细条方向一律以右文案锚字为准，见模块头）。
-        # M11c①：尾注整句 f_note 浅灰常规（原 f_tiny 下「后重置」CJK 比数字重一档）。
+        self._codex_bar_block(m, right, y + CODEX_TEXT_Y, main, stale, c_name, c_soft)
         if sec is not None:
-            by, bh = P(y + 72), P(5.4)
-            used_txt = (f"已用 {sec.pct_used:.1%}" if sec.pct_used is not None
-                        else "暂无百分比")
-            rtxt = f"{used_txt} · {fmt_countdown(sec.resets_at)}"
-            lab = sec.label
-            barx = m + self.f_tiny.measure(lab) + P(6)
-            lw_lim = right - barx - self.f_note.measure(rtxt) - P(10)
-            self._bar(barx, by, max(P(30), lw_lim), bh, sec.pct_used,
-                      STALE if stale else self._bar_color(sec.pct_used),
-                      track=TRACK, edge=TRACK_EDGE)
-            c.create_text(m, by + bh / 2, anchor="w", font=self.f_tiny,
-                          fill=SOFT if not stale else FAINT, text=lab)
-            c.create_text(right, by + bh / 2, anchor="e", font=self.f_note,
-                          fill=c_soft, text=rtxt)
-        bottom = top + ROW_FULL + (ROW_ADDON if sec is not None else 0)
-        self.hits.append((m - P(6), P(top), right + P(6), P(bottom),
+            self._codex_bar_block(m, right, y + CODEX_TEXT_Y + CODEX_TXT_BAR + 9
+                                  + CODEX_GAP, sec, stale, c_name, c_soft)
+        bottom = y + ROW_FULL
+        self.hits.append((m - self._p(6), P(y), right + self._p(6), P(bottom),
                           {"u": u, "err": info["err"], "stale": stale}))
         return bottom
+
+    def _codex_bar_block(self, m: float, right: float, ty: float, win: Window,
+                         stale: bool, c_name: str, c_soft: str) -> None:
+        """M14 单信息块：文字行中心在 ty，条占 ty+7 .. ty+7+9（几何语法=百炼 B 行）。"""
+        c, P = self.canvas, self._p
+        pct = win.pct_used
+        txt = (f"{codex_win_caption(win.label)} · 已用 {pct:.1%}" if pct is not None
+               else f"{codex_win_caption(win.label)} · 暂无百分比")
+        c.create_text(m, P(ty), anchor="w", font=self.f_tiny, fill=c_soft, text=txt)
+        c.create_text(right, P(ty), anchor="e", font=self.f_small_b,
+                      fill=c_name, text=fmt_countdown(win.resets_at))
+        self._bar(m, P(ty + CODEX_TXT_BAR), right - m, P(9), pct,
+                  STALE if stale else self._bar_color(pct))
 
     def _draw_err_row(self, y: float, info: dict, m: float, w: float) -> float:
         """从未成功过的失败行：明确状态文案，不渲染空值假象。"""

@@ -106,7 +106,7 @@ def main_run(tmp: Path) -> int:
         x, y, w, h = cap.capture(app.root, LOCAL / "m11c_semon_dual.png")
         ts = canvas_texts(app)
         chk1 = any(t.startswith("剩 6,000 / 20,000") for t in ts) \
-            and any(t.startswith("已用 30.0% · ") for t in ts)
+            and "周窗 · 已用 30.0%" in " | ".join(ts)     # M14：codex 周为等尺寸主条块
         print(f"图1 双槽同屏 rect=({x},{y},{w}x{h}) 锚字齐备={chk1}", flush=True)
         ok &= chk1
 

@@ -75,7 +75,7 @@ def main_run(tmp: Path) -> int:
         ts = [str(app.canvas.itemcget(i, "text")) for i in app.canvas.find_all()
               if app.canvas.type(i) == "text"]
         main_txt = "5h · 已用 0.0%" in " | ".join(ts)
-        strip_ok = any(t.startswith("已用 80.0% · ") for t in ts)
+        strip_ok = "周窗 · 已用 80.0%" in " | ".join(ts)     # M14：周等尺寸主条块
         big_ok = "100%" in ts and "20%" not in "".join(ts)
         # 槽位顺序证据：主条行（5h）中心必在副细条行（周 label）之上
         c = app.canvas
