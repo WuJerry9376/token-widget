@@ -27,6 +27,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,19 @@ def _section(app, key: str) -> dict:
     if isinstance(v, dict):
         d.update(v)
     return d
+
+
+def _up_last_check_text(sec: dict) -> str:
+    """M17：频控命中状态行=纯上次检查时间（当日 HH:MM，跨日带月日；无记录 "--"）。"""
+    try:
+        ts = float(sec.get("last_check") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts <= 0:
+        return "上次检查：--"
+    if time.strftime("%Y-%m-%d", time.localtime(ts)) == time.strftime("%Y-%m-%d"):
+        return "上次检查：" + time.strftime("%H:%M", time.localtime(ts))
+    return "上次检查：" + time.strftime("%m-%d %H:%M", time.localtime(ts))
 
 
 def _provider_bound(app, name: str) -> bool:
@@ -338,6 +352,17 @@ class SettingsPanel(_Card):
                                      cursor="hand2", bg=INK, fg=PAPER,
                                      activebackground="#57503E", relief="flat", bd=0,
                                      padx=14, pady=3, command=self._up_elevate)
+        # ---- M17：一键打开 GitHub 项目页（加星便捷入口；非 star API、零网络请求、
+        #      零凭据接触；slug 空=禁用融纸，同代理组禁用语言） ----
+        rf = self.row("支持")
+        self.btn_star = tk.Button(rf, text="☆ 给本项目加星", font=app.f_small,
+                                  bg=BADGE_BG, fg=INK, activebackground=BADGE_EDGE,
+                                  disabledforeground=FAINT, relief="flat", bd=0,
+                                  padx=12, pady=2, highlightthickness=1,
+                                  highlightbackground=BADGE_EDGE, command=self._up_star)
+        self.btn_star.pack(side="left")
+        tk.Label(rf, text="  在浏览器中打开项目页（本程序不发起任何账号操作）",
+                 font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(side="left")
         self._up_info = None            # 本轮发现的 UpdateInfo（下载动作的唯一来源）
         self._up_staged = None          # M16：已下载的 new exe 路径（提权重试免二次下载）
         self._up_busy = False
@@ -573,6 +598,30 @@ class SettingsPanel(_Card):
         slug = updater.parse_repo(sec.get("repo"))
         self.lbl_up_repo.configure(
             text=f"  源 GitHub Releases · {slug}" if slug else "  源未配置（update.repo）")
+        # M17：slug 空 → 星按钮禁用融纸（与「测试连通」禁用语言同律）
+        btn = getattr(self, "btn_star", None)
+        if btn is not None:
+            if slug:
+                btn.configure(state="normal", bg=BADGE_BG, cursor="hand2",
+                              highlightthickness=1, highlightbackground=BADGE_EDGE)
+            else:
+                btn.configure(state="disabled", bg=PAPER, cursor="arrow",
+                              highlightthickness=0)
+
+    def _up_star(self) -> None:
+        """M17：默认浏览器打开 GitHub 项目页（加星在页面完成；本程序零 API/零凭据）。
+
+        拉起失败（无默认浏览器等）→ 状态行橙字一句指路手动访问。"""
+        url = updater.repo_url(_section(self.app, "update").get("repo"))
+        if not url:
+            return
+        try:
+            ok = webbrowser.open(url)
+        except Exception:                             # noqa: BLE001 webbrowser 解析失败兜底
+            ok = False
+        if not ok:
+            self.lbl_up.configure(text=f"未能拉起浏览器：请手动访问 {url} 加星",
+                                  fg=ORANGE)
 
     def _up_refresh(self, manual: bool) -> None:
         # 定时路径（manual=False）只对接入 update 节的配置生效：真实 app 经
@@ -623,7 +672,8 @@ class SettingsPanel(_Card):
         self._up_busy = False
         self.btn_up_check.configure(state="normal")
         if res.skipped:
-            self.lbl_up.configure(text="6 小时内已检查过（定时检查被频控；可手动「检查更新」）",
+            # M17 文案锁：频控命中只显示上次检查时间（禁再出现 频控/6小时/手动 类说明）
+            self.lbl_up.configure(text=_up_last_check_text(_section(self.app, "update")),
                                   fg=SOFT_TXT)
             return                                    # 频控不视为错误
         if not res.ok:

@@ -34,7 +34,7 @@ from src import auth, config as config_mod, settings_panel, state as state_mod  
 from src import updater as up                                                     # noqa: E402
 from src.scheduler import Scheduler                                               # noqa: E402
 from src.state import DEFAULTS                                                    # noqa: E402
-from src.ui import FAINT, OK, ORANGE, NoteApp                                     # noqa: E402
+from src.ui import FAINT, OK, ORANGE, PAPER, NoteApp                                  # noqa: E402
 from src.version import APP_VERSION                                               # noqa: E402
 import main as main_mod                                                           # noqa: E402
 
@@ -639,6 +639,94 @@ def u24_tick_triggers_and_dot(app, root) -> str:
     return "startup 一次性/亮灭点/点击路由/开关与缺节双静默"
 
 
+def u27_repo_url() -> str:
+    """M17：项目页 URL 由 slug 派生（非法拒绝、零网络）。"""
+    assert up.repo_url("o/r") == "https://github.com/o/r"
+    assert up.repo_url("https://github.com/o/r.git") == "https://github.com/o/r"
+    assert up.repo_url("") == "" and up.repo_url(None) == "" and up.repo_url("bad") == ""
+    return "repo_url slug 派生+非法拒绝"
+
+
+def u25_skipped_text_lock(app, root) -> str:
+    """M17 文案锁：频控命中状态行=「上次检查：HH:MM」；禁词（频控/6 小时/随时/手动）
+    不得回流；纯函数面覆盖无记录"--"与跨日形态。"""
+    import webbrowser as _wb
+    open_orig = _wb.open
+    _wb.open = lambda u: (_net.append("browser!" + u), False)[1]   # 本案绝不该拉浏览器
+    now = time.time()
+    clear_cfg(repo="fake-owner/fake-repo", enabled=True, last_check=int(now - 600))
+    calls: list = []
+
+    def bump(url, headers, opener=None):
+        calls.append(url)
+        raise AssertionError("频控命中不应触网")
+    orig_req = up._req
+    up._req = bump
+    try:
+        panel = settings_panel.SettingsPanel(app)
+        panel.withdraw()
+        panel._up_refresh(False)                     # 定时路径→真 check() 在触网前判 skipped
+        assert pump_until(root, lambda: panel.lbl_up.cget("text").startswith("上次检查：")), \
+            panel.lbl_up.cget("text")
+        t = panel.lbl_up.cget("text")
+        assert t == "上次检查：" + time.strftime("%H:%M", time.localtime(now - 600)), t
+        for taboo in ("频控", "6 小时", "随时", "手动"):
+            assert taboo not in t, f"禁词回流：{taboo} in {t}"
+        assert not calls, "skipped 判定发生在网络请求之前"
+        panel.destroy()
+    finally:
+        up._req = orig_req
+        _wb.open = open_orig
+    lc = settings_panel._up_last_check_text
+    assert lc({"last_check": 0}) == "上次检查：--"
+    assert lc({"last_check": "bad"}) == "上次检查：--"
+    y = now - 2 * 86400
+    assert lc({"last_check": y}) == "上次检查：" + time.strftime("%m-%d %H:%M", time.localtime(y))
+    return "skipped=上次检查时刻/四禁词/--与跨日形态"
+
+
+def u26_star_button(app, root) -> str:
+    """M17：☆ 按钮渲染/启用态/点击 URL 断言（webbrowser 打桩，零真浏览器零网络）；
+    拉起失败橙字；slug 空=禁用融纸+点击零唤起。"""
+    import webbrowser as _wb
+    orig_open = _wb.open
+    urls: list = []
+    _wb.open = lambda u: (urls.append(u), True)[1]
+    try:
+        clear_cfg(repo="fake-owner/fake-repo", enabled=False)
+        panel = settings_panel.SettingsPanel(app)
+        panel.withdraw()
+        texts = texts_of(panel, [])
+        assert any(t == "☆ 给本项目加星" for t in texts), "按钮文案"
+        assert any("在浏览器中打开项目页" in t for t in texts), "FAINT 注记"
+        assert str(panel.btn_star.cget("state")) == "normal", "有 slug 可点"
+        panel.btn_star.invoke()
+        assert urls == ["https://github.com/fake-owner/fake-repo"], urls
+        assert "未能拉起" not in panel.lbl_up.cget("text")          # 成功静默
+        _wb.open = lambda u: False
+        panel._up_star()
+        assert "未能拉起浏览器" in panel.lbl_up.cget("text")        # 失败→橙字一句
+        assert panel.lbl_up.cget("fg").lower() == ORANGE.lower()
+        def boom(u):
+            raise RuntimeError("no default browser")
+        _wb.open = boom
+        panel._up_star()
+        assert "未能拉起浏览器" in panel.lbl_up.cget("text")        # 异常同样兜底
+        panel.destroy()
+        urls.clear()
+        clear_cfg(repo="", enabled=False)
+        p2 = settings_panel.SettingsPanel(app)
+        p2.withdraw()
+        assert str(p2.btn_star.cget("state")) == "disabled", "空 slug → 禁用态"
+        assert str(p2.btn_star.cget("bg")).lower() == PAPER.lower(), "禁用融纸（同代理组语言）"
+        p2._up_star()
+        assert urls == [], "空 slug 绝不唤起浏览器"
+        p2.destroy()
+    finally:
+        _wb.open = orig_open
+    return "渲染/启用/URL 断言/静默成功/失败橙字/空 slug 禁用零唤起"
+
+
 def clear_cfg(**upd) -> None:
     cfg = {**CFG, "update": {**CFG["update"], **upd}}
     (tmp_root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -675,6 +763,7 @@ CASES_PURE = [
     ("stamp", u17_stamp),
     ("probe", u18_probe),
     ("elevation", u19_elevation),
+    ("repo_url", u27_repo_url),
 ]
 
 CASES_TK = [
@@ -683,6 +772,8 @@ CASES_TK = [
     ("panel_auto_readonly_err", u22_panel_auto_readonly_and_err),
     ("panel_failed_forceopen", u23_panel_failed_note_and_force_open),
     ("tick_triggers_dot", u24_tick_triggers_and_dot),
+    ("skipped_text_lock", u25_skipped_text_lock),
+    ("star_button", u26_star_button),
 ]
 
 

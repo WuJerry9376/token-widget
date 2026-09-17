@@ -34,6 +34,7 @@ from . import config as _config
 from . import netconfig
 
 GITHUB_API = "https://api.github.com/repos/{slug}/releases/latest"
+GITHUB_WEB = "https://github.com/"                    # M17：项目页前缀（webbrowser 用，零 API）
 UA = "token-widget/updater"                         # GitHub API 无 UA 直接 403
 TIMEOUT = 20
 CHECK_INTERVAL_SECONDS = 6 * 3600                   # 定时检查频控窗口（6h）
@@ -87,6 +88,12 @@ def parse_repo(repo) -> str:
     if not re.fullmatch(r"[\w.\-]+", owner) or not re.fullmatch(r"[\w.\-]+", name):
         return ""
     return f"{owner}/{name}"
+
+
+def repo_url(repo) -> str:
+    """M17：由 slug（或原始 repo 串）派生项目页 URL；非法/空 → ""。零网络。"""
+    slug = parse_repo(repo)
+    return GITHUB_WEB + slug if slug else ""
 
 
 def _ver_tuple(v) -> tuple[int, int, int]:
