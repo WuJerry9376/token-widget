@@ -16,6 +16,11 @@ M16 增补：next_trigger 六路判定/stamp 日期戳/权限预检 probe/NEED_E
 M18 增补：u26 改造为 foot GitHub 图标案例（渲染/隐藏零占位/点击 URL 打桩/失败橙字）；
 u28 mirror normalize 两形态+回退链 direct→proxy→mirror 顺序与 digest 校验路径；
 u29 digest 不符拒收+文件清理+镜像缺 digest 拒收（直连缺 digest 放行带 note）。
+M19 增补：u21 改造为发现新版自动弹 UpdateDialog（标题/vX→vY/发布时间/包大小/发行说明/
+两按钮）+ 取消后「查看」重开 + 旧内联按钮文案禁回流；u30 弹窗执行链（立即更新→
+download_and_stage/apply 桩、512KB 节流 %、通道审计、失败重试、NEED_ELEVATION 提权档、
+关窗后残余事件安全）；u31 纯函数（published/size/notes≤6 行截断）；定时路径 u22 加
+「绝不自动弹窗」断言。
 """
 from __future__ import annotations
 
@@ -83,15 +88,17 @@ class RecReq:
         return r
 
 
-def rel_body(tag="v9.9.9", assets=None, body="release notes", digest=None):
+def rel_body(tag="v9.9.9", assets=None, body="release notes", digest=None,
+             published="2026-09-18T01:02:00Z", size=11263948):
     a: list = assets if assets is not None else [
-        {"name": "TokenWidget.exe",
+        {"name": "TokenWidget.exe", "size": size,
          "browser_download_url": "https://dl.example/TokenWidget.exe"},
         {"name": "sha256.txt",
          "browser_download_url": "https://dl.example/sha256.txt"}]
     if digest is not None and assets is None:
         a = [dict(a[0], digest=digest), a[1]]
-    return json.dumps({"tag_name": tag, "body": body, "assets": a}).encode()
+    return json.dumps({"tag_name": tag, "body": body, "assets": a,
+                       "published_at": published}).encode()
 
 
 # ------------------------------------------------------- 纯函数 ----
@@ -99,18 +106,20 @@ def rel_body(tag="v9.9.9", assets=None, body="release notes", digest=None):
 def u1_parse_release_forms() -> str:
     a = up.parse_release(json.loads(rel_body("v1.7.0")))
     assert a == ("1.7.0", "https://dl.example/TokenWidget.exe", "release notes",
-                 None), a
+                 None, 11263948, "2026-09-18T01:02:00Z"), a
     b = up.parse_release(json.loads(rel_body("1.7.0", assets=[   # 无主名但唯一 .exe → 兜底
         {"name": "other.exe", "browser_download_url": "https://dl.example/other.exe"}])))
     assert b[0] == "1.7.0" and b[1] == "https://dl.example/other.exe", b
+    assert b[4] == 0, "兜底腿 asset 无 size → 0"
+    assert b[5] == "2026-09-18T01:02:00Z", "published 是顶层字段，与选中腿无关"
     c = up.parse_release(json.loads(rel_body(assets=[            # 多 .exe 无主名 → 宁缺勿错
         {"name": "a.exe", "browser_download_url": "u1"},
         {"name": "b.exe", "browser_download_url": "u2"}])))
     assert c[1] == "", c
     d = up.parse_release(json.loads(rel_body(assets=[])))        # 无 asset
-    assert d[1] == "" and d[0] == "9.9.9" and d[3] is None, d
-    assert up.parse_release("garbage") == ("", "", "", None)
-    assert up.parse_release({}) == ("", "", "", None)
+    assert d[1] == "" and d[0] == "9.9.9" and d[3] is None and d[4] == 0, d
+    assert up.parse_release("garbage") == ("", "", "", None, 0, "")
+    assert up.parse_release({}) == ("", "", "", None, 0, "")
     # M18：digest 归一——"sha256:<hex>" / 裸 64hex → "sha256:<hex64>"；畸形 → None
     h = "ab" * 32
     e = up.parse_release(json.loads(rel_body(digest=f"sha256:{h.upper()}")))
@@ -121,15 +130,20 @@ def u1_parse_release_forms() -> str:
     assert g[3] is None, g
     gh = up.parse_release(json.loads(rel_body(digest="md5:" + h)))      # 非 sha256 → None
     assert gh[3] is None, gh
-    # digest 跟随**选中 asset**（主名匹配腿），不被兜底腿污染
+    # M18/M19：digest/size 跟随**选中 asset**（主名匹配腿），不被兜底腿污染
     hi = "cd" * 32
     k = up.parse_release(json.loads(rel_body(assets=[
         {"name": "TokenWidget.exe", "browser_download_url": "https://dl/t.exe",
-         "digest": f"sha256:{hi}"},
+         "digest": f"sha256:{hi}", "size": 111},
         {"name": "other.exe", "browser_download_url": "https://dl/o.exe",
-         "digest": "sha256:" + "ee" * 32}])))
-    assert k[3] == f"sha256:{hi}", k
-    return "主名匹配/唯一.exe兜底/多exe留空/无asset/坏JSON/digest 归一与跟腿 七态"
+         "digest": "sha256:" + "ee" * 32, "size": 99999}])))
+    assert k[3] == f"sha256:{hi}" and k[4] == 111, k
+    # published 非 str → ""；size 非 int（bool/str）→ 0（展示端换算容错）
+    m = up.parse_release({"tag_name": "v1", "published_at": 42,
+                          "assets": [{"name": "TokenWidget.exe",
+                                      "browser_download_url": "u", "size": True}]})
+    assert m[4] == 0 and m[5] == "", m
+    return "主名/兜底/多exe/无asset/坏JSON/digest 归一跟腿/size·published 容错 九态"
 
 
 def u2_is_newer_matrix() -> str:
@@ -520,31 +534,56 @@ def u20_panel_render_and_toggle(app, root) -> str:
 
 
 def u21_panel_manual_flow(app, root) -> str:
-    clear_cfg(repo="fake-owner/fake-repo", enabled=False)   # 关自动路径，专测手动（避免抢占 busy）
+    """M19 改造（案例迁移非删）：手动发现新版→**自动弹 UpdateDialog**（路径 a）+
+    弹窗渲染三要素两按钮 + 取消后「查看」重开（c）+ 单例换新 + 关面板级联散 +
+    旧内联下载/确认按钮文案禁回流。等版态不弹。"""
+    clear_cfg(repo="fake-owner/fake-repo", enabled=False)   # 关自动路径，专测手动
     orig_check = up.check
     up.check = lambda cfg, force=False, **kw: up.CheckResult(
         ok=True, info=up.UpdateInfo(version="9.9.9", url="https://dl.example/t.exe",
-                                    notes="新版说明"))
+                                    notes="新版说明", size=11263948,
+                                    published="2026-09-18T01:02:00Z"))
     try:
         panel = settings_panel.SettingsPanel(app)
         panel.withdraw()
         panel._up_refresh(True)                       # 手动检查
-        ok = pump_until(root, lambda: "发现新版本" in panel.lbl_up.cget("text"))
-        assert ok, panel.lbl_up.cget("text")
+        ok = pump_until(root, lambda: panel._up_dialog is not None
+                        and panel._up_dialog.alive())
+        assert ok, panel.lbl_up.cget("text")          # a：发现即自动弹
+        assert "发现新版本 v9.9.9" in panel.lbl_up.cget("text")
         assert panel.lbl_up.cget("fg").lower() == ORANGE.lower()
-        assert panel.btn_up_dl.winfo_manager() != "", "手动路径应出现「立即下载并更新」"
-        panel._up_ask_confirm()
-        assert "继续" in panel.lbl_up.cget("text"), "二次确认（简版内联）"
-        assert panel.btn_up_go.winfo_manager() != "" and panel.btn_up_no.winfo_manager() != ""
-        panel._up_confirm_cancel()
-        assert panel.btn_up_dl.winfo_manager() != "", "取消回退到下载按钮"
-        assert panel.btn_up_go.winfo_manager() == ""
+        dlg = panel._up_dialog
+        dtexts = texts_of(dlg, [])
+        assert any(t == "发现新版本 v9.9.9" for t in dtexts), "弹窗标题条"
+        assert any(f"当前版本 v{APP_VERSION} → v9.9.9" in t for t in dtexts), "版本行"
+        assert any("2026-09-18 01:02 (UTC)" in t for t in dtexts), "发布时间"
+        assert any("10.7 MB" in t for t in dtexts), "包大小字节→MB 一位小数"
+        assert any("新版说明" in t for t in dtexts), "发行说明"
+        assert dlg.btn_go.cget("text") == "立即更新" and dlg.btn_no.cget("text") == "取消"
+        assert dlg.btn_go.winfo_manager() != "" and dlg.btn_no.winfo_manager() != ""
+        # 旧内联语言禁回流（面板体内；弹窗不在面板子树=独立 Toplevel）
+        ptexts = texts_of(panel, [])
+        for taboo in ("立即下载并更新", "确认更新", "提权更新"):
+            assert all(taboo not in t for t in ptexts), f"{taboo} 回流"
+        assert not hasattr(panel, "btn_up_dl") and not hasattr(panel, "btn_up_elev")
         saved = json.loads((tmp_root / "config.json").read_text(encoding="utf-8"))
         assert saved["update"]["last_check"] > 0, "检查后 last_check 落盘"
+        # 取消 → 弹窗散；状态行「查看」入口仍在（c）且可重开
+        dlg.btn_no.invoke()
+        assert pump_until(root, lambda: not dlg.alive()), "取消即散"
+        assert panel.btn_up_view.winfo_manager() != "", "「查看」入口仍在"
+        panel._up_open_dialog()
+        assert panel._up_dialog is not dlg and panel._up_dialog.alive(), "查看=重开"
+        old = panel._up_dialog
+        panel._up_open_dialog()
+        assert not old.alive() and panel._up_dialog.alive() \
+            and panel._up_dialog is not old, "重复开=先关旧（单例）"
+        last = panel._up_dialog
         panel.destroy()
+        assert not last.alive(), "关面板级联散弹窗"
     finally:
         up.check = orig_check
-    # 已是最新态
+    # 已是最新态：绿字、不弹
     up.check = lambda cfg, force=False, **kw: up.CheckResult(
         ok=True, info=up.UpdateInfo(version=APP_VERSION, url="u"))
     try:
@@ -554,10 +593,12 @@ def u21_panel_manual_flow(app, root) -> str:
         p2._up_refresh(True)
         assert pump_until(root, lambda: "已是最新" in p2.lbl_up.cget("text"))
         assert p2.lbl_up.cget("fg").lower() == OK.lower()
+        assert p2._up_dialog is None and p2.btn_up_view.winfo_manager() == "", \
+            "等版=无弹窗无查看"
         p2.destroy()
     finally:
         up.check = orig_check
-    return "手动：发现→下载钮→确认→取消；等版=绿已是最新"
+    return "手动发现→自动弹窗(标题/三信息/两钮)→取消查看重开→单例→级联散→等版不弹"
 
 
 def u22_panel_auto_readonly_and_err(app, root) -> str:
@@ -570,7 +611,10 @@ def u22_panel_auto_readonly_and_err(app, root) -> str:
         panel.withdraw()
         ok = pump_until(root, lambda: "只读" in panel.lbl_up.cget("text"), timeout=6.0)
         assert ok, panel.lbl_up.cget("text")
-        assert panel.btn_up_dl.winfo_manager() == "", "定时路径不得给下载钮、绝不自动下载"
+        # M19 d 路径：定时发现（即便用户在设置页）→ 只读提示，**绝不自动弹窗**、
+        # 不给「查看」（橙点出口在 ui 侧），也不触任何下载。
+        assert panel._up_dialog is None, "定时路径绝不自动弹（防打扰）"
+        assert panel.btn_up_view.winfo_manager() == "", "定时不给「查看」按钮"
         panel.destroy()
     finally:
         up.check = orig_check
@@ -648,8 +692,14 @@ def u24_tick_triggers_and_dot(app, root) -> str:
                   if getattr(z[4], "__name__", "") == "_upd_open")
         cb()                                        # 点击橙点 → 设置页（force 消费在 u23 已验）
         assert pump_until(root, lambda: len(calls) >= 2), "force 检查发出"
+        # M19 b 路径：橙点 force 发现新版 → 同样自动弹 UpdateDialog
+        st = app._settings
+        assert st is not None and pump_until(
+            root, lambda: st._up_dialog is not None and st._up_dialog.alive(),
+            timeout=6.0), "b：橙点 force 路径自动弹窗"
+        assert texts_of(st._up_dialog, []) and st._up_dialog.btn_go.winfo_manager() != ""
         if app._settings is not None and app._settings.alive():
-            app._settings.destroy()
+            app._settings.destroy()                 # 级联关弹窗（M19）
         # 已是最新 → 灭点（橙点此前亮着：9.9.9 发现态）
         assert app._upd_new is not None and app.canvas.find_withtag("updot"), "前置：点仍亮"
         up.check = lambda cfg, force=False, **kw: up.CheckResult(
@@ -793,6 +843,101 @@ def u26_gh_foot_icon(app, root) -> str:
     return "foot 图标：渲染/hover 换档/tooltip/URL 断言/失败橙字/空 slug 零占位/星钮不回流"
 
 
+def u30_dialog_update_chain(app, root) -> str:
+    """M19：弹窗「立即更新」执行链（download_and_stage/apply 全桩，零真网络零替换）——
+    点击直接进下载（无内联再确认）→ 通道审计+校验态 → 失败橙字+重试/关闭 →
+    staged 免重下 → NEED_ELEVATION 提权档（elevated=True 透传）→ 下载失败态 →
+    关窗后残余事件安全（回调判存活）。"""
+    clear_cfg(repo="fake-owner/fake-repo", enabled=False)
+    info = up.UpdateInfo(version="9.9.9", url="https://dl.example/t.exe", notes="n",
+                         digest="sha256:" + "ab" * 32, size=1500000,
+                         published="2026-09-18T01:02:00Z")
+    orig_dl, orig_ap = up.download_and_stage, up.apply_update_and_restart
+    staged = config_mod.LOCAL_DIR / "update" / up.NEW_EXE_NAME
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b"MZ-stub")
+    seen: dict = {}
+
+    def fake_dl(url, cfg=None, digest=None, progress_cb=None, **kw):
+        seen["url"], seen["digest"] = url, digest
+        if progress_cb is not None:
+            progress_cb(300 * 1024, 1500000)              # <512KB：updater 内部已节流
+            progress_cb(600 * 1024, 1500000)
+        return up.DownloadResult(path=staged, channel="mirror", note="测试审计")
+
+    up.download_and_stage = fake_dl
+    up.apply_update_and_restart = lambda path, elevated=False, **kw: "stub：未真替换"
+    try:
+        panel = settings_panel.SettingsPanel(app)
+        panel.withdraw()
+        panel._up_info = info
+        panel._up_open_dialog()
+        dlg = panel._up_dialog
+        dlg.btn_go.invoke()                                # 立即更新=直接下载（弹窗即确认）
+        assert dlg.btn_go.winfo_manager() == "", "进度中按钮组隐去（无内联再确认环节）"
+        # 状态迁移（同 tick 连排瞬态经 hist 留痕可断）：下载中→节流 %→审计校验→apply 败
+        assert pump_until(root, lambda: "更新未完成" in dlg.lbl_prog.cget("text"),
+                          timeout=4.0), dlg.lbl_prog.cget("text")
+        assert any(h.startswith("正在下载更新包…") for h in dlg.hist)
+        assert any("41.0%（已收 0.6 MB）" in h for h in dlg.hist), dlg.hist
+        assert any("经镜像源" in h and "校验" in h and "测试审计" in h for h in dlg.hist), \
+            "通道审计+note 上屏（瞬态）"
+        assert seen["url"] == info.url and seen["digest"] == info.digest, "cfg/digest 透传"
+        # 失败态（apply 桩给原因）：橙字 + 「重试」「关闭」恢复
+        t = dlg.lbl_prog.cget("text")
+        assert "stub：未真替换" in t
+        assert dlg.lbl_prog.cget("fg").lower() == ORANGE.lower()
+        assert dlg.btn_retry.winfo_manager() != "" and dlg.btn_close2.winfo_manager() != ""
+        # 重试：staged 已缓存 → 不再下载，直接 apply
+        ndl: list = []
+        up.download_and_stage = lambda *a, **k: ndl.append(1) or up.DownloadResult(err="x")
+        up.apply_update_and_restart = (
+            lambda path, elevated=False, **kw: up.NEED_ELEVATION + "无写入权限")
+        dlg.btn_retry.invoke()
+        assert pump_until(root, lambda: "提权更新" in dlg.lbl_prog.cget("text"),
+                          timeout=4.0), dlg.lbl_prog.cget("text")
+        assert ndl == [], "staged 免重下"
+        assert dlg.btn_elev.winfo_manager() != "" and dlg.btn_no.winfo_manager() != ""
+        # 提权档：apply(elevated=True) 透传；失败→回失败档
+        seen2: dict = {}
+        def ap2(path, elevated=False, **kw):
+            seen2["elev"] = elevated
+            return "stub：提权未成就"
+        up.apply_update_and_restart = ap2
+        dlg.btn_elev.invoke()
+        assert pump_until(root, lambda: "提权未成就" in dlg.lbl_prog.cget("text"),
+                          timeout=4.0)
+        assert seen2.get("elev") is True, "elevated=True 透传"
+        # 取消=✕ 语义：立即更新按下前的取消键关窗（下载失败态的「关闭」同上）
+        dlg.btn_close2.invoke()
+        assert pump_until(root, lambda: not dlg.alive()), "关闭即散"
+        # 下载失败态：err 上屏（橙字+重试档）
+        up.download_and_stage = lambda *a, **k: up.DownloadResult(
+            err="网络错误：全部失败（测试脱敏）")
+        panel._up_open_dialog()
+        d2 = panel._up_dialog
+        d2.btn_go.invoke()
+        assert pump_until(root, lambda: "更新未完成" in d2.lbl_prog.cget("text")
+                          and "测试脱敏" in d2.lbl_prog.cget("text"), timeout=4.0)
+        # 关窗时 worker 仍在跑：残余事件打到已销毁窗不崩（_poll alive 守卫）
+        evq: list = []
+        def slow_dl(url, cfg=None, digest=None, progress_cb=None, **kw):
+            if progress_cb is not None:
+                progress_cb(600 * 1024, 1500000)          # 关窗后才被消费的事件
+            return up.DownloadResult(path=staged, channel="direct", note="")
+        up.download_and_stage = slow_dl
+        up.apply_update_and_restart = lambda path, elevated=False, **kw: evq.append(1) or "x"
+        panel._up_open_dialog()
+        d3 = panel._up_dialog
+        d3.btn_go.invoke()
+        d3.destroy()                                      # 立刻关窗
+        pump(root, 400)                                   # 残余事件冲刷：不抛=过
+        panel.destroy()
+    finally:
+        up.download_and_stage, up.apply_update_and_restart = orig_dl, orig_ap
+    return "立即更新直下/审计校验/失败重试/免重下/提权透传/下载败态/关窗残余安全"
+
+
 def u28_mirror_normalize_chain() -> str:
     """M18：mirror normalize 两形态统一 + 回退链顺序 direct→proxy→mirror 与 digest 校验路径。"""
     nm = up.normalize_mirror
@@ -901,7 +1046,47 @@ def u29_digest_guard() -> str:
     ctx5 = FakeCtx(FakeResp([body], cl=len(body)))
     r5 = up.download_and_stage(u, digest="sha256:zzz", dest_dir=d, req_open=ctx5.open)
     assert r5.path is not None and "digest" in r5.note
-    return "不符拒收双清/多腿换腿/镜像缺哈希拒收/直连缺哈希放行 note/畸形入参不炸"
+    # ⑤ M19 进度节流：600KB 体、64KB chunk → 仅跨过 512KB 时回调一次（末段不再刷）
+    wipe()
+    calls: list = []
+    big = b"Q" * (600 * 1024)
+    chunks = [big[i:i + 65536] for i in range(0, len(big), 65536)]
+    ctx6 = FakeCtx(FakeResp(chunks, cl=len(big)))
+    r6 = up.download_and_stage(u, dest_dir=d, req_open=ctx6.open,
+                               progress_cb=lambda done, total: calls.append(done))
+    assert r6.path is not None and calls == [524288], calls
+    # ⑥ 回调抛异常不断下载（展示层故障隔离）
+    wipe()
+
+    def badcb(_d, _t):
+        raise RuntimeError("ui boom")
+    ctx7 = FakeCtx(FakeResp(list(chunks), cl=len(big)))
+    r7 = up.download_and_stage(u, dest_dir=d, req_open=ctx7.open, progress_cb=badcb)
+    assert r7.path is not None and r7.err == "", r7.err
+    return "不符拒收双清/换腿/镜像缺哈希拒收/直连缺哈希 note/畸形入参/512KB 节流/坏 cb 不断流"
+
+
+def u31_dialog_helpers() -> str:
+    """M19 纯函数：发布时间/包大小换算 + 发行说明 ≤6 行截断（弹窗信息区数据面）。"""
+    sp = settings_panel
+    assert sp._up_pub_text("2026-09-18T01:02:00Z") == "2026-09-18 01:02 (UTC)"
+    assert sp._up_pub_text("") == "—" and sp._up_pub_text(None) == "—"
+    assert sp._up_pub_text("garbage") == "garbage"          # 非 ISO 原样截 16
+    assert sp._up_size_text(11263948) == "10.7 MB"
+    assert sp._up_size_text(1048576) == "1.0 MB"
+    assert sp._up_size_text(0) == "—" and sp._up_size_text("x") == "—" and sp._up_size_text(-5) == "—"
+    # notes：硬换行 10 行 → 前 6 行 + 尾 …
+    notes = "标题行\n" + ("行内容一二三\n" * 10)
+    clip = sp._up_notes_clip(notes)
+    lines = clip.splitlines()
+    assert len(lines) == 6 and lines[-1].endswith("…"), clip
+    assert sp._up_notes_clip("") == "（无发行说明）"
+    assert sp._up_notes_clip("short one") == "short one"
+    # 单一超长段软换行（textwrap 52 列）→ 同样 ≤6 行 + …；wraplength=420 不溢出
+    big = "中英 mixed 词 " * 200
+    c2 = sp._up_notes_clip(big)
+    assert len(c2.splitlines()) == 6 and c2.endswith("…"), c2
+    return "published 容错/size MB 一位小数/notes 六行截断软换行/空说明占位"
 
 
 def clear_cfg(**upd) -> None:
@@ -943,6 +1128,7 @@ CASES_PURE = [
     ("repo_url", u27_repo_url),
     ("mirror_chain", u28_mirror_normalize_chain),
     ("digest_guard", u29_digest_guard),
+    ("dialog_helpers", u31_dialog_helpers),
 ]
 
 CASES_TK = [
@@ -953,6 +1139,7 @@ CASES_TK = [
     ("tick_triggers_dot", u24_tick_triggers_and_dot),
     ("skipped_text_lock", u25_skipped_text_lock),
     ("gh_foot_icon", u26_gh_foot_icon),
+    ("dialog_update_chain", u30_dialog_update_chain),
 ]
 
 

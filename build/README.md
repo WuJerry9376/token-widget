@@ -123,6 +123,16 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-19 v1.8.1 换装（M19 / fixer：发现新版改专属弹窗确认 UpdateDialog，内联
+  「立即下载并更新」组退役；updater 元数据扩 size/published_at + progress_cb 节流）**：
+  双源升版（看门 PASS）；门禁 10 套 **169/169 全绿**（M15 套 31→33：u21 弹窗改造/
+  u22 不弹守卫/u30 执行链/u31 纯函数）；重建 **10.8 MB / ~9s**，PE 通过，属性 1.8.1。
+  GBK console 冒烟 exit=0、stderr 0B、无 openai；守卫四件 COPIED(new)+哈希一致、
+  openai 复净 ✓；弹窗三态实拍 `python tests\capture_m19.py` → **M19 CAPTURE: PASS**
+  `local\m19_dialog.png`（待命/hover/进度 2× 合成；假数据+真实风格 notes 六行截断）。
+  收口：git commit + tag v1.8.1 + push + `gh release create v1.8.1 dist\TokenWidget.exe`；
+  发布后真链路复核：常驻=1.8.0 下 `updater.check` 真调用 is_newer(1.8.1)>v1.8.0=True、
+  digest 有值（官方 API 已带 sha256）——**不执行 apply**，用户下次开设置页见新弹窗链路。
 - **2026-09-18 v1.8.0 换装（M18 / fixer：foot GitHub 图标（M17 星钮改向，超采样剪影）+
   更新镜像备用源（直连→代理→镜像回退链）+ SHA-256 信任锚（asset.digest 强校验、镜像缺
   哈希拒收、元数据恒官方 API））**：双源升版 version.py + version_info.txt（看门 PASS）；

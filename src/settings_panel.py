@@ -25,11 +25,20 @@
   ②更新分组加「镜像源（可选）」Entry 行（粘贴即存 normalize_mirror 规范化，
   纯前缀/占位式两形态统一存 "scheme://host/" 拼接式；仅加速二进制下载，
   版本信息恒走 GitHub 官方 API）。绘图函数在本模块（共享小模块刻意不外溢 ui.py）。
+- M19：发现新版改**专属弹窗确认**（用户反馈内联按钮可发现性差）——UpdateDialog
+  （_Card 语言）展示 vX→vY/发布时间/包大小/发行说明(≤6 行截断)，底部「立即更新」
+  （主按钮实底档）+「取消」（浅描边档）；手动检查与橙点 force 发现新版自动弹出，
+  状态行留「发现新版 vY」+「查看」可重开；定时路径仍只读不弹（防打扰）。旧内联
+  「立即下载并更新/确认更新/取消/提权更新」组退役，能力迁入弹窗（点立即更新直接
+  进下载，二次确认并入弹窗本身）；下载进度每 ≥512KB 节流刷 %，失败=橙字+重试/关闭，
+  NEED_ELEVATION=「提权更新」钮照旧。
 """
 from __future__ import annotations
 
 import os
 import queue
+import re
+import textwrap
 import threading
 import time
 import tkinter as tk
@@ -435,30 +444,19 @@ class SettingsPanel(_Card):
         self.lbl_up = tk.Label(self.body, text="", font=app.f_small, wraplength=440,
                                justify="left", **{**_tk_colors(), "fg": SOFT_TXT})
         self.lbl_up.pack(anchor="w", pady=(2, 0))
-        self._up_btnf = tk.Frame(self.body, **_frame_kw())   # 下载/确认按钮行（按需 pack）
-        self.btn_up_dl = tk.Button(self._up_btnf, text="立即下载并更新",
-                                   font=app.f_small_b, cursor="hand2", bg=INK, fg=PAPER,
-                                   activebackground="#57503E", relief="flat", bd=0,
-                                   padx=14, pady=3, command=self._up_ask_confirm)
-        self.btn_up_go = tk.Button(self._up_btnf, text="确认更新",
-                                   font=app.f_small_b, cursor="hand2", bg=INK, fg=PAPER,
-                                   activebackground="#57503E", relief="flat", bd=0,
-                                   padx=14, pady=3, command=self._up_apply)
-        self.btn_up_no = tk.Button(self._up_btnf, text="取消", font=app.f_small,
-                                   cursor="hand2", bg=BADGE_BG, fg=SOFT_TXT,
-                                   activebackground=BADGE_EDGE, relief="flat", bd=0,
-                                   padx=14, pady=3, highlightthickness=1,
-                                   highlightbackground=BADGE_EDGE,
-                                   command=self._up_confirm_cancel)
-        # M16：目录无写权限时的「提权更新」（一次 UAC，借 PowerShell -Verb RunAs）
-        self.btn_up_elev = tk.Button(self._up_btnf, text="提权更新", font=app.f_small_b,
-                                     cursor="hand2", bg=INK, fg=PAPER,
-                                     activebackground="#57503E", relief="flat", bd=0,
-                                     padx=14, pady=3, command=self._up_elevate)
-        # ---- M18：M17 星形按钮按用户改向删除——开仓页入口移至 foot 行版本签名左侧
-        #      的 GitHub 剪影图标（见 _build foot 段）；orange 兜底语义由 _up_open_repo 保留 ----
-        self._up_info = None            # 本轮发现的 UpdateInfo（下载动作的唯一来源）
-        self._up_staged = None          # M16：已下载的 new exe 路径（提权重试免二次下载）
+        # ---- M19：内联「立即下载并更新/确认更新/取消/提权更新」整组退役——下载与
+        #      确认改由 UpdateDialog 专属弹窗承接（用户反馈可发现性差）。此处仅留
+        #      「查看」小按钮：重开弹窗入口（弹窗被取消后仍在） ----
+        self._up_btnf = tk.Frame(self.body, **_frame_kw())   # 「发现新版 + 查看」行（按需 pack）
+        self.btn_up_view = tk.Button(self._up_btnf, text="查看", font=app.f_small,
+                                     cursor="hand2", bg=BADGE_BG, fg=INK,
+                                     activebackground=BADGE_EDGE, relief="flat", bd=0,
+                                     padx=10, pady=1, highlightthickness=1,
+                                     highlightbackground=BADGE_EDGE,
+                                     command=self._up_open_dialog)
+        # M17/M18：GitHub 图标入口与失败橙字兜底不变（foot 行，见下方 _gh_* 组）
+        self._up_info = None            # 本轮发现的 UpdateInfo（弹窗唯一数据源）
+        self._up_dialog = None          # M19：当前弹出的 UpdateDialog（弱单例，重复弹先关旧）
         self._up_busy = False
         self._up_q = queue.Queue()
         self._up_sync_repo_label()
@@ -701,6 +699,18 @@ class SettingsPanel(_Card):
         self._up_sync_repo_label()
         self._say("自动更新已" + ("开启" if sec["enabled"] else "关闭"))
 
+    def destroy(self) -> None:
+        """M19：面板销毁级联关闭其 UpdateDialog（弹窗挂 app.root 层不随父窗自然散）。"""
+        dlg = getattr(self, "_up_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.alive():
+                    dlg.destroy()
+            except tk.TclError:
+                pass
+            self._up_dialog = None
+        super().destroy()
+
     def _save_mirror(self, event=None) -> None:
         """镜像源粘贴即存：normalize 后回写 Entry（所见=所存）；空=不使用。"""
         raw = self.var_mirror.get().strip()
@@ -838,10 +848,6 @@ class SettingsPanel(_Card):
                 if item[0] == "check":
                     _, res, manual = item
                     self._up_show_check(res, manual)
-                elif item[0] == "dl":
-                    self._up_show_dl(item[1])
-                elif item[0] == "info":                   # M18：通道审计一行（临时态）
-                    self.lbl_up.configure(text=item[1], fg=SOFT_TXT)
         except queue.Empty:
             pass
         self.after(150, self._up_poll)
@@ -869,19 +875,19 @@ class SettingsPanel(_Card):
                                        f"{time.strftime('%H:%M')}）", fg=OK)
             self._up_hide_buttons()
             return
-        notes = (res.info.notes or "").strip().replace("\r", " ").replace("\n", " ")
         head = f"发现新版本 v{res.info.version}"
-        if notes:
-            head += f" · {notes[:60]}{'…' if len(notes) > 60 else ''}"
         if manual:
-            self.lbl_up.configure(text=head + "：可立即下载并更新（将退出当前程序）",
-                                  fg=ORANGE)
+            # M19：手动检查发现新版 → 弹专属确认窗（触发路径 a；b=橙点 force 同走此路）。
+            # 状态行保留发现文案 + 「查看」入口（c：弹窗被关后仍可重开）。
             if res.info.url:
-                self._up_show_download()
+                self.lbl_up.configure(text=head + "：详情见弹窗（更新将退出当前程序）",
+                                      fg=ORANGE)
+                self._up_open_dialog()
             else:
                 self.lbl_up.configure(text=head + "：但该 release 无 TokenWidget.exe 资源",
                                       fg=ORANGE)
         else:
+            # d：定时发现（含用户在设置页）→ 维持只读提示+主窗橙点，绝不自动弹窗（防打扰）
             self.lbl_up.configure(text=head + "（定时只读提示，不自动下载）", fg=ORANGE)
 
     def _save_last_check(self) -> None:
@@ -892,87 +898,21 @@ class SettingsPanel(_Card):
 
     def _up_hide_buttons(self) -> None:
         self._up_btnf.pack_forget()
-        for b in (self.btn_up_dl, self.btn_up_go, self.btn_up_no, self.btn_up_elev):
-            b.pack_forget()
+        self.btn_up_view.pack_forget()
 
-    def _up_show_download(self) -> None:
-        self._up_hide_buttons()
-        self.btn_up_dl.pack(side="left")
+    def _up_show_view(self) -> None:
+        """c 路径：状态行下挂「查看」小按钮（重开弹窗；重复弹先关旧窗保持单实例）。"""
+        self._up_btnf.pack_forget()
+        self.btn_up_view.pack(side="left")
         self._up_btnf.pack(anchor="w", pady=(4, 0))
 
-    def _up_ask_confirm(self) -> None:
-        """简版二次确认（_Card 内联语言，不弹系统对话框）。"""
+    def _up_open_dialog(self) -> None:
         if self._up_info is None or not self._up_info.url:
             return
-        self.btn_up_dl.pack_forget()
-        self.btn_up_go.pack(side="left")
-        self.btn_up_no.pack(side="left", padx=(8, 0))
-        self.lbl_up.configure(text=f"将关闭并替换当前版本 → v{self._up_info.version}，"
-                                   "凭据与设置不受影响。继续？", fg=ORANGE)
-
-    def _up_confirm_cancel(self) -> None:
-        if self._up_info is not None and self._up_info.url:
-            self._up_show_download()                  # 取消确认 → 回退到「立即下载并更新」可重试
-        else:
-            self._up_hide_buttons()
-        if self._up_info is not None:
-            self.lbl_up.configure(text=f"发现新版本 v{self._up_info.version}"
-                                       "（已取消本次下载）", fg=SOFT_TXT)
-
-    def _up_apply(self) -> None:
-        if self._up_info is None or not self._up_info.url or self._up_busy:
-            return
-        self._up_busy = True
-        self._up_hide_buttons()
-        self.lbl_up.configure(text="正在下载更新包…（完成后自动替换并重启）", fg=SOFT_TXT)
-        threading.Thread(target=self._up_worker_apply, args=(self._up_info.url,),
-                         daemon=True).start()
-
-    def _up_worker_apply(self, url: str) -> None:
-        try:
-            dig = self._up_info.digest if self._up_info is not None else None
-            res = updater.download_and_stage(url, cfg=self.app.cfg, digest=dig)
-            if res.err:
-                self._up_q.put(("dl", res.err))
-                return
-            # M18：非默认通道/未校验放行 → 状态行补一句通道审计（apply 随即退出）
-            if res.channel != "direct" or res.note:
-                word = {"proxy": "经代理", "mirror": "经镜像源"}.get(res.channel, "直连")
-                self._up_q.put(("info", "下载完成（" + word + "）"
-                                     + (f"：{res.note}" if res.note else "")))
-            self._up_staged = res.path               # M16：暂存供「提权更新」免重下
-            err = updater.apply_update_and_restart(res.path)   # 成功=不返回（exit）
-            self._up_q.put(("dl", err or "更新脚本已就位但未能退出"))
-        except Exception as e:                            # noqa: BLE001
-            self._up_q.put(("dl", f"更新异常：{type(e).__name__}"))
-
-    def _up_elevate(self) -> None:
-        """M16：目录无写权限时的一次性提权重试（PowerShell -Verb RunAs，单次 UAC）。"""
-        if self._up_staged is None or self._up_busy:
-            return
-        self._up_busy = True
-        self._up_hide_buttons()
-        self.lbl_up.configure(text="已在提权请求中：确认 UAC 后自动完成替换…", fg=SOFT_TXT)
-        staged = self._up_staged
-        threading.Thread(target=lambda: self._up_q.put(
-            ("dl", updater.apply_update_and_restart(staged, elevated=True)
-                   or "更新脚本已就位但未能退出")), daemon=True).start()
-
-    def _up_show_dl(self, err: str) -> None:
-        self._up_busy = False
-        self.btn_up_check.configure(state="normal")
-        if err == "":
-            self.lbl_up.configure(text="✓ 更新脚本已接管，正在退出…", fg=OK)
-            return
-        if err.startswith(updater.NEED_ELEVATION):        # M16：预检失败→不退出，给出路
-            self.lbl_up.configure(
-                text=err[len(updater.NEED_ELEVATION):] + "。更新包已就绪，可点击下方「提权更新」",
-                fg=ORANGE)
-            self.btn_up_elev.pack(side="left")
-            self._up_btnf.pack(anchor="w", pady=(4, 0))
-            return
-        self.lbl_up.configure(text=f"更新未完成：{err[:90]}", fg=ORANGE)
-        self._up_show_download()
+        if self._up_dialog is not None and self._up_dialog.alive():
+            self._up_dialog.destroy()                 # 单例：重开=换新
+        self._up_show_view()
+        self._up_dialog = UpdateDialog(self.app, self._up_info)
 
     def _save_poll(self, event=None) -> None:
         try:
@@ -1025,6 +965,224 @@ class SettingsPanel(_Card):
 
 
 # 阈值输入框文字色见文件头 YELLOW_FG / RED_FG
+
+
+class UpdateDialog(_Card):
+    """M19 发现新版专属确认窗（_Card 纸面语言/直角/缝线标题条/✕ 关闭）。
+
+    用户反馈 v1.7.x 内联「立即下载并更新」可发现性差 → 手动检查（或橙点 force）
+    发现新版即弹本窗：信息区（vX→vY / 更新时间 / 包大小 / 发行说明 ≤6 行截断）+
+    底部「立即更新」（保存实底档）「取消」（浅描边档）。弹窗本身即确认，点
+    「立即更新」直接进下载（原内联再确认环节退役）。
+    执行链全复用 updater：download_and_stage（三级回退+digest；progress_cb 每
+    ≥512KB 回投节流）→ apply_update_and_restart（权限预检→NEED_ELEVATION 提权
+    兜底）。弹窗内状态区：下载 x.x% → 校验 → 「新版本启动中，本窗口将关闭」；
+    失败=橙字+「重试」「关闭」恢复；NEED_ELEVATION=「提权更新」钮。
+    线程处置：worker 线程只往本窗 queue 投事件，after 回投前 alive 判存——窗口
+    关闭后残余事件随窗口销毁自然丢弃（daemon 线程无外部副作用，最坏=白下完
+    .part 不 apply）。不做强制 grab；主设置面板保持可交互（简单权衡：防误触
+    靠模态不必要，弹窗置顶且 ✕ 即散）。
+    """
+
+    def __init__(self, app, info) -> None:
+        super().__init__(app, f"发现新版本 v{info.version}", geo_tag="UPDATEDLG")
+        self.info = info
+        self._staged: Path | None = None
+        self._busy = False
+        self._q: queue.Queue = queue.Queue()
+        self.hist: list[str] = []           # lbl_prog 落文史（瞬态可测/调试；每窗独立）
+        cur = f"v{APP_VERSION}"
+        tgt = f"v{info.version}"
+        tk.Label(self.body, text=f"当前版本 {cur} → {tgt}", font=app.f_small_b,
+                 **{**_tk_colors(), "fg": INK}).pack(anchor="w", pady=(0, 4))
+        tk.Label(self.body, text=f"发布时间 {_up_pub_text(info.published)}",
+                 font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(anchor="w")
+        tk.Label(self.body, text=f"包大小 {_up_size_text(info.size)}",
+                 font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(anchor="w")
+        tk.Label(self.body, text="发行说明", font=app.f_small_b,
+                 **{**_tk_colors(), "fg": SOFT_TXT}).pack(anchor="w", pady=(8, 2))
+        tk.Label(self.body, text=_up_notes_clip(info.notes), font=app.f_note,
+                 justify="left", wraplength=420,
+                 **{**_tk_colors(), "fg": SOFT_TXT}).pack(anchor="w")
+        self.lbl_prog = tk.Label(self.body, text="", font=app.f_small, wraplength=420,
+                                 justify="left", **{**_tk_colors(), "fg": SOFT_TXT})
+        self.lbl_prog.pack(anchor="w", pady=(10, 0))
+        bf = tk.Frame(self.body, **_frame_kw())
+        bf.pack(anchor="w", pady=(10, 0))
+        self.btn_go = tk.Button(bf, text="立即更新", font=app.f_small_b, cursor="hand2",
+                                bg=INK, fg=PAPER, activebackground="#57503E",
+                                relief="flat", bd=0, padx=16, pady=4, command=self._go)
+        self.btn_no = tk.Button(bf, text="取消", font=app.f_small, cursor="hand2",
+                                bg=BADGE_BG, fg=SOFT_TXT, activebackground=BADGE_EDGE,
+                                activeforeground=INK, relief="flat", bd=0, padx=16,
+                                pady=4, highlightthickness=1,
+                                highlightbackground=BADGE_EDGE, command=self.close_card)
+        # M16 语义迁入：NEED_ELEVATION 出路钮 + 失败态「重试」「关闭」
+        self.btn_elev = tk.Button(bf, text="提权更新", font=app.f_small_b, cursor="hand2",
+                                  bg=INK, fg=PAPER, activebackground="#57503E",
+                                  relief="flat", bd=0, padx=16, pady=4,
+                                  command=self._elevate)
+        self.btn_retry = tk.Button(bf, text="重试", font=app.f_small, cursor="hand2",
+                                   bg=BADGE_BG, fg=INK, activebackground=BADGE_EDGE,
+                                   relief="flat", bd=0, padx=16, pady=4,
+                                   highlightthickness=1, highlightbackground=BADGE_EDGE,
+                                   command=self._retry)
+        self.btn_close2 = tk.Button(bf, text="关闭", font=app.f_small, cursor="hand2",
+                                    bg=BADGE_BG, fg=SOFT_TXT,
+                                    activebackground=BADGE_EDGE, relief="flat", bd=0,
+                                    padx=16, pady=4, highlightthickness=1,
+                                    highlightbackground=BADGE_EDGE, command=self.close_card)
+        self._btnf = bf
+        self._show_buttons(self.btn_go, self.btn_no)
+        self.finish()
+        self.after(150, self._poll)
+
+    # ---- 按钮组合切换（一组三态：待命 / 进度中(隐) / 失败 / 需提权） ----
+
+    def _show_buttons(self, *btns) -> None:
+        self._btnf.pack_forget()
+        for b in (self.btn_go, self.btn_no, self.btn_elev, self.btn_retry,
+                  self.btn_close2):
+            b.pack_forget()
+        for i, b in enumerate(btns):
+            b.pack(side="left", padx=(8, 0) if i else 0)
+        self._btnf.pack(anchor="w", pady=(10, 0))
+
+    def _prog(self, text: str, fg: str) -> None:
+        """状态区写入（hist 留痕：同 tick 内被覆盖的瞬态也可断言/排障）。"""
+        self.hist.append(text)
+        self.lbl_prog.configure(text=text, fg=fg)
+
+    def _go(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._show_buttons()
+        self._prog("正在下载更新包…", SOFT_TXT)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _retry(self) -> None:
+        self._go()
+
+    def _elevate(self) -> None:
+        """目录无写权限的一次性提权重试（PowerShell -Verb RunAs，单次 UAC；M16 迁入）。"""
+        if self._staged is None or self._busy:
+            return
+        self._busy = True
+        self._show_buttons()
+        self._prog("已在提权请求中：确认 UAC 后自动完成替换…", SOFT_TXT)
+        staged = self._staged
+        threading.Thread(target=lambda: self._q.put(
+            ("apply", updater.apply_update_and_restart(staged, elevated=True)
+             or "更新脚本已就位但未能退出")), daemon=True).start()
+
+    # ---- worker（线程只投 queue，UI 全走 after 回投；progress_cb 线程安全） ----
+
+    def _worker(self) -> None:
+        try:
+            if self._staged is None:
+                state = {"last": 0}
+
+                def cb(done: int, total: int) -> None:
+                    if done - state["last"] >= updater.PROGRESS_STEP_BYTES:
+                        state["last"] = done
+                        self._q.put(("pct", done, total))
+
+                res = updater.download_and_stage(
+                    self.info.url, cfg=self.app.cfg, digest=self.info.digest,
+                    progress_cb=cb)
+                if res.err:
+                    self._q.put(("fail", res.err))
+                    return
+                self._staged = res.path
+                self._q.put(("audit", res.channel, res.note))
+            err = updater.apply_update_and_restart(self._staged)  # 成功=不返回（exit）
+            self._q.put(("apply", err or "更新脚本已就位但未能退出"))
+        except Exception as e:                            # noqa: BLE001
+            self._q.put(("fail", f"更新异常：{type(e).__name__}"))
+
+    def _poll(self) -> None:
+        if not self.alive():
+            return
+        try:
+            while True:
+                item = self._q.get_nowait()
+                kind = item[0]
+                if kind == "pct":
+                    _, done, total = item
+                    pct = (done / total * 100.0) if total else 0.0
+                    self._prog(f"正在下载更新包… {pct:.1f}%（已收 {done / 1048576:.1f} MB）",
+                               SOFT_TXT)
+                elif kind == "audit":
+                    _, channel, note = item
+                    word = {"proxy": "经代理", "mirror": "经镜像源"}.get(channel, "直连")
+                    txt = f"下载完成（{word}）· 校验通过，正在接管替换…"
+                    self._prog(txt + (f"\n{note}" if note else ""), SOFT_TXT)
+                elif kind == "apply":
+                    self._show_apply(item[1])
+                elif kind == "fail":
+                    self._show_fail(item[1])
+        except queue.Empty:
+            pass
+        self.after(150, self._poll)
+
+    def _show_apply(self, err: str) -> None:
+        self._busy = False
+        if err == "":
+            return                                        # 理论不达：apply 成功先 exit
+        if err.startswith(updater.NEED_ELEVATION):        # 预检失败→不退出，给出路
+            self._prog(err[len(updater.NEED_ELEVATION):] + "。更新包已就绪，可点「提权更新」",
+                       ORANGE)
+            self._show_buttons(self.btn_elev, self.btn_no)
+            return
+        self._show_fail(err)
+
+    def _show_fail(self, err: str) -> None:
+        self._busy = False
+        self._prog(f"更新未完成：{err[:120]}", ORANGE)
+        self._show_buttons(self.btn_retry, self.btn_close2)
+
+
+def _up_pub_text(published) -> str:
+    """published_at ISO8601（GitHub 恒 UTC，尾 Z）→ 'YYYY-MM-DD HH:MM (UTC)'；坏/空→"—"。"""
+    s = str(published or "").strip()
+    if not s:
+        return "—"
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", s)
+    if not m:
+        return s[:16]
+    y, mo, d, hh, mm = m.groups()
+    return f"{y}-{mo}-{d} {hh}:{mm} (UTC)"
+
+
+def _up_size_text(size) -> str:
+    """字节 → '10.8 MB'（一位小数）；非 int/<=0 → '—'（未知）。"""
+    try:
+        n = int(size)
+    except (TypeError, ValueError):
+        return "—"
+    if n <= 0:
+        return "—"
+    return f"{n / 1048576.0:.1f} MB"
+
+
+def _up_notes_clip(notes, max_lines: int = 6) -> str:
+    """发行说明展示截断：折叠 CR → 按硬换行+textwrap 软换行 → 前 6 行，超长尾 '…'。
+
+    空/None → '（无发行说明）'。列宽 52（CJK 双宽字符在 wraplength=420 下不溢出）。"""
+    t = str(notes or "").strip()
+    if not t:
+        return "（无发行说明）"
+    lines: list[str] = []
+    for para in t.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        para = para.strip()
+        if not para:
+            continue
+        wrapped = textwrap.wrap(para, width=52) or [""]
+        lines.extend(wrapped)
+    if len(lines) > max_lines:
+        return "\n".join(lines[:max_lines]) + "…"
+    return "\n".join(lines)
 
 
 class CredentialPanel(_Card):

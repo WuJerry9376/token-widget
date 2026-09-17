@@ -55,6 +55,7 @@ TIMEOUT = 20
 CHECK_INTERVAL_SECONDS = 6 * 3600                   # 定时检查频控窗口（6h）
 ASSET_NAME = "TokenWidget.exe"                      # 主匹配资源名（大小写不敏感）
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")         # M18 digest 归一判据
+PROGRESS_STEP_BYTES = 512 * 1024                    # M19 下载进度节流步长（512KB）
 
 _UPDATE_REL = Path("update")
 NEW_EXE_NAME = "TokenWidget.new.exe"
@@ -69,8 +70,10 @@ class UpdateInfo:
     """releases/latest 解析结果（check 成功时携带）。"""
     version: str                    # 去 v 前缀的 tag
     url: str                        # 目标 exe 下载直链（可空串=无可用资源）
-    notes: str = ""                 # release body（原文，展示端截断）
+    notes: str = ""                 # release body（原文全文，展示端截断）
     digest: str | None = None       # M18：asset.digest "sha256:<hex64>"；无/畸形=None
+    size: int = 0                   # M19：asset.size 字节（0=未知，弹窗展示 MB）
+    published: str = ""             # M19：release published_at 原文（ISO8601，""=无）
 
 
 @dataclass
@@ -160,17 +163,19 @@ def _asset_digest(a: dict) -> str | None:
     return f"sha256:{t}" if _SHA256_HEX.fullmatch(t) else None
 
 
-def parse_release(j) -> tuple[str, str, str, str | None]:
-    """releases/latest JSON → (version, url, notes, digest)。
+def parse_release(j) -> tuple[str, str, str, str | None, int, str]:
+    """releases/latest JSON → (version, url, notes, digest, size, published)。
 
     - tag_name 去 v 前缀；缺失/非 dict → version=""；
     - 资源：先按名匹配 TokenWidget.exe（大小写不敏感）；无则**唯一** .exe 兜底；
       多个 .exe 且无主名 → url=""（宁缺勿错下）。draft/prerelease 不在本函数判定范围
       （latest 端点已过滤）。
     - M18：digest 取自**选中的那个 asset** 的 digest 字段（None=API 未提供）。
+    - M19：size=选中 asset 的 size 字节（非 int/缺失 → 0，展示端换算 MB）；
+      published=顶层 published_at 原文（非 str → ""，展示端格式化容错）。
     """
     if not isinstance(j, dict):
-        return "", "", "", None
+        return "", "", "", None, 0, ""
     tag = j.get("tag_name")
     version = ""
     if isinstance(tag, str) and tag.strip():
@@ -187,15 +192,18 @@ def parse_release(j) -> tuple[str, str, str, str | None]:
         url = str(a.get("browser_download_url") or "")
         if not url:
             continue
-        ent = (url, _asset_digest(a))
+        sz = a.get("size")
+        ent = (url, _asset_digest(a), sz if isinstance(sz, int) and not isinstance(sz, bool) else 0)
         if name.lower() == ASSET_NAME.lower():
             named.append(ent)
         if name.lower().endswith(".exe"):
             exes.append(ent)
-    pick = named[0] if named else (exes[0] if len(exes) == 1 else ("", None))
-    url, digest = pick
+    pick = named[0] if named else (exes[0] if len(exes) == 1 else ("", None, 0))
+    url, digest, size = pick
     notes = j.get("body")
-    return version, url, notes if isinstance(notes, str) else "", digest
+    pub = j.get("published_at")
+    return (version, url, notes if isinstance(notes, str) else "", digest, size,
+            pub if isinstance(pub, str) else "")
 
 
 def _req(url: str, headers: dict, opener=None) -> tuple[int, dict, bytes]:
@@ -258,11 +266,12 @@ def check(cfg: dict, force: bool = False, now: float | None = None,
             j = json.loads(body)
         except ValueError:
             return CheckResult(err="GitHub API 响应非 JSON")
-        ver, dl, notes, digest = parse_release(j)
+        ver, dl, notes, digest, size, pub = parse_release(j)
         if not ver:
             return CheckResult(err="响应缺少 tag_name（仓库无 release？）")
-        return CheckResult(ok=True, info=UpdateInfo(version=ver, url=dl,
-                                                    notes=notes, digest=digest))
+        return CheckResult(ok=True, info=UpdateInfo(version=ver, url=dl, notes=notes,
+                                                    digest=digest, size=size,
+                                                    published=pub))
     return CheckResult(err=err + ("（直连与代理均失败）" if fallback_ok else "（直连失败）"))
 
 
@@ -411,12 +420,14 @@ def _dl_open(req, timeout: float, att_opener, req_open):
 
 def download_and_stage(url: str, cfg: dict | None = None, digest: str | None = None,
                        dest_dir: Path | str | None = None, opener=None,
-                       req_open=None, chunk: int = 65536) -> DownloadResult:
+                       req_open=None, chunk: int = 65536, progress_cb=None) -> DownloadResult:
     """流式下载到 <dest>/TokenWidget.new.exe（.part → 校验 → rename）。
 
     M18 回退链（_dl_attempts）：直连 → 代理（开启则经 build_opener）→ 镜像
     （配置则「前缀+原URL」重试）；每腿失败进下一腿，返回值 channel 记录**成功**
     所用通道，三链全败 err 汇总（脱敏）。
+    M19：progress_cb(done_bytes, total_bytes)——每读满 ≥512KB 节流回调一次
+    （total=Content-Length 声明值；回调异常吞掉，绝不因展示层打断下载）。
     完整性判据（按优先级）：
     1. Content-Length 必存在且与实收一致；
     2. digest 有值 → 流式 sha256 **必校验**，不符删 .part 报错（换腿重试）；
@@ -466,6 +477,7 @@ def download_and_stage(url: str, cfg: dict | None = None, digest: str | None = N
                     last_err = "响应缺 Content-Length，无法校验完整性（已放弃）"
                     continue
                 with part.open("wb") as fh:
+                    last_rep = 0
                     while True:
                         buf = resp.read(chunk)
                         if not buf:
@@ -473,6 +485,14 @@ def download_and_stage(url: str, cfg: dict | None = None, digest: str | None = N
                         fh.write(buf)
                         hasher.update(buf)
                         got += len(buf)
+                        # M19：≥512KB 节流回投（每腿独立计数）；展示层异常不断下载
+                        if (progress_cb is not None
+                                and got - last_rep >= PROGRESS_STEP_BYTES):
+                            last_rep = got
+                            try:
+                                progress_cb(got, cl_n)
+                            except Exception:       # noqa: BLE001
+                                pass
             if got != cl_n:
                 part.unlink(missing_ok=True)
                 last_err = f"长度不符：声明 {cl_n} 实收 {got}（已放弃）"
