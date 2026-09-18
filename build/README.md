@@ -123,6 +123,22 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-18 v1.9.1 收口换装（打包线：M28 更新链去 cmd 化重启）**：里程碑 commit
+  `13aa2ae`（4 文件：main.py 启动早期挂 run_pending_swap + src/updater.py marker 链 +
+  test_m15_update 29→34 + README A6 机制行；逐文件敏感扫描 CLEAN）；双源升版 1.9.1
+  （看门 13/13 PASS），收口 commit `ef96b47`；门禁 11 套 **187/187**。构建 10.8 MB/~9s，
+  PE 通过，属性 FileVersion/ProductVersion **1.9.1**。守卫四件（config/state/cookie/
+  auth.json）复布哈希一致（dist 侧新 config 先回同步项目侧再布，cookie 基线 FBA4C5 不变、
+  auth F3A9C2 不变）；HKCU Run **IDENTICAL**（值本不存在，冒烟全程零写入）；**MpCmdRun
+  0 检出**；frozen 冒烟：console 变体 `--quit-after 40 --verbose` exit=0/stderr 0B/无
+  openai、windowed 40s 自退 exit=0 无残留、无 marker 启动零副作用（update 目录不生成）。
+  **1.9.1 正式体 E2E 复跑**（scripts/dbg_archive/_dbg_m28_e2e.py 适配版，staged=正式体
+  改 hash 副本 -SWAPTEST2）六判据全 PASS：①零 cmd ②正名==SWAPTEST2/.old==正式 1.9.1
+  ③marker 消费无 FAILED ④旧实例映像改名后存活 responding ⑤WER 0 事件 ⑥自修复分支不
+  触发（无 .old.old/正名未搬回/目录空壳）；SWAPPED@ +1.0s；测毕恢复干净 1.9.1 常驻双进程。
+  收口：tag v1.9.1 + push --follow-tags + `gh release create v1.9.1`（asset digest==dist
+  hash d069446fc5db，releases/latest 复验）。（注：上一条 v1.9.0 行日期标注 09-20 系前轮
+  笔误，实际换装发生于 09-18。）
 - **2026-09-20 v1.9.0 换装（打包线：M25 全画面去「窗口」+ M26 DPI Per-Monitor v2）**：
   里程碑 commit `b372c94`（12 文件：main/ui/settings_panel + test_m26_dpi 新套 9 案 +
   tools/diag 诊断脚本×2 入库[逐文件敏感扫描 CLEAN]；门禁 11 套 **186/186**）；双源升版
