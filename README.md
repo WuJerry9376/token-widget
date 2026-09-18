@@ -2,7 +2,7 @@
 
 A Windows sticky-note widget that keeps your LLM subscription quotas on the desktop — Bailian Token Plan · OpenCode Go · ChatGPT Codex, at a glance, no browser tab required.
 
-![Demo: two provider rows, update dot, confirm dialog and download progress](docs/screenshots/demo.gif)
+![Demo: three provider rows, update dot, confirm dialog and download progress](docs/screenshots/demo.gif)
 
 [![release](https://img.shields.io/github/v/release/WuJerry9376/token-widget)](https://github.com/WuJerry9376/token-widget/releases)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -30,12 +30,12 @@ A Windows sticky-note widget that keeps your LLM subscription quotas on the desk
 
 | | |
 |---|---|
-| ![Main note: Bailian credits remaining with two Codex window bars](docs/screenshots/feature_note.png) | ![Settings: providers, proxy, update and display options](docs/screenshots/feature_settings.png) |
+| ![Main note: Bailian credits with plan-expiry note, OpenCode Go three windows, Codex plan bars](docs/screenshots/feature_note.png) | ![Settings: providers, proxy, update and display options](docs/screenshots/feature_settings.png) |
 | *Main note* | *Settings* |
 | ![Update dialog: version diff, release date, size and notes](docs/screenshots/feature_dialog.png) | ![After dragging close to the right edge, the note snaps flush](docs/screenshots/feature_snap.png) |
 | *Update dialog* | *Edge snap (right edge)* |
-| ![Close-up of the Codex row: two bars for the 5-hour and weekly windows](docs/screenshots/feature_dualbar.png) | |
-| *Codex dual progress bars* | |
+| ![OpenCode Go stacked windows: 5h/day/week bars](docs/screenshots/feature_go3bars.png) | ![Close-up of the Codex row: two bars for the 5-hour and weekly windows](docs/screenshots/feature_dualbar.png) |
+| *OpenCode Go three window bars* | *Codex dual progress bars* |
 
 ## Update & security
 
@@ -86,9 +86,9 @@ python cli.py                     # console view of the same collected data
 
 ### 界面一览
 
-主浮窗 / 设置页 / 更新弹窗 / 贴边吸附 / Codex 双进度条——见上文截图（alt 文案对应）。
+主浮窗 / 设置页 / 更新弹窗 / 贴边吸附 / OpenCode Go 三窗条 / Codex 双进度条——见上文截图（alt 文案对应）。
 
-> **演示数据说明**：截图与动图中的数值均为演示数据（示例口径 39,375 / v1.8.1→v1.9.0 等），非真实账户数据。真实凭据态下百炼/Codex 常为橙色告警档，观感不佳，故演示数值注入的是渲染层（与真数据同一条渲染路径），界面排版与实机一致。
+> **演示数据说明**：截图与动图中的数值均为演示数据（示例口径 35,772 / 「套餐 10-12 到期」/ 弹窗 v1.9.0 示例版本等），非真实账户数据。真实凭据态下各源常含橙色告警档，观感不佳，故演示数值注入的是渲染层（与真数据同一条渲染路径），界面排版与实机一致。
 
 ### 构建与验证
 

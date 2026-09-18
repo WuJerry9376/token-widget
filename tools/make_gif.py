@@ -8,8 +8,8 @@
 便笺 495×435、弹窗 599×330、tooltip 等同屏元素同刻度，全部帧 1:1 截取无重采样，
 成品 620×540（宽 ≤660 达成）。
 
-帧序列（200ms/帧，无限循环）：
-    f1 静置两行（百炼 39,375 系假数据 + Codex 双主条）
+帧序列（200ms/帧，无限循环；v1.8.3 三源真态数据，与 tests/capture_m24.py 同口径）：
+    f1 静置三行（百炼 35,772＋套餐到期灰档后缀 / Go 三主条 5h·日·周 / Codex 双条 41%·8%）
     f2 发现新版橙点亮起（真实 _upd_new → _render 支路）
     f3 悬停 tooltip（真实 _tip_show 渲染，仅事件坐标为合成）
     f4 更新弹窗展开（SettingsPanel._up_open_dialog → UpdateDialog 真实构造）
@@ -50,8 +50,8 @@ import main as main_mod                                           # noqa: E402
 SRC_DIR = ROOT / "docs" / "screenshots" / "src"
 GIF_PATH = ROOT / "docs" / "screenshots" / "demo.gif"
 
-# 舞台：物理 620×540（S=1.5），成品宽 ≤660。所有帧同一矩形，屏幕坐标固定。
-STAGE = (40, 24, 620, 540)
+# 舞台：物理 620×660（S=1.5，三行浮窗 495×639），成品宽 ≤660。所有帧同一矩形。
+STAGE = (40, 24, 620, 660)
 NOTE_OFF = (62, 10)                        # 便笺左上角相对舞台（水平居中 495 宽）
 SCALE_FACTOR = 1.5                         # 强制渲染刻度（150% DPI 等效）
 DUR_MS = 200
@@ -59,12 +59,12 @@ DUR_MS = 200
 _NOW = datetime.now(timezone.utc)
 CFG = {"poll_seconds": 300, "low_yellow_pct": 0.15, "low_red_pct": 0.05,
        "always_on_top": True, "autostart": False,
-       "enabled_providers": ["bailian", "codex"],
+       "enabled_providers": ["bailian", "opencode_go", "codex"],
        "update": {"enabled": True, "repo": "WuJerry9376/token-widget",
                   "mirror": "", "last_check": time.time(),
                   "last_auto_date": "2000-01-01"}}
 
-# GIF 内弹窗演示用短 notes（保证弹窗宽 ≤ 舞台 330px；feature_dialog.png 才用长 notes
+# GIF 内弹窗演示用短 notes（保证弹窗宽 ≤ 舞台 620px；feature_dialog.png 才用长 notes
 # 实证 ≤6 行截断排版）。
 NOTES_GIF = (
     "• 发现新版改为专属弹窗确认\n"
@@ -75,23 +75,36 @@ TOTAL_BYTES = 11263948                     # 示例包大小 10.7 MB
 
 
 def u_bailian() -> Usage:
-    """演示数据：7d 周期 40,000 已用 51.6%（剩 19,375）＋ 加油包 20,000 → 大数字 39,375。"""
-    weekly, pct, ar = 40000.0, 0.515625, 20000.0
+    """v1.8.3 口径：7d=40,000 已用 31.6%（剩 27,360）＋加油包 8,412/20,000 →
+    大数字 35,772=Σfloor；C 行尾带 M23 套餐后缀（+23 天 → 恒灰档，重跑不变色）。"""
+    weekly, pct, ar = 40000.0, 0.316, 8412.0
     return Usage(provider="bailian", ok=True, spec="pro", unit="credits",
                  used=weekly * pct, total=60000.0,
                  remaining=weekly * (1 - pct) + ar, pct_used=pct,
-                 resets_at=_NOW + timedelta(hours=8, minutes=2),
-                 windows=[Window("7d", pct, _NOW + timedelta(hours=8, minutes=2))],
-                 addon_remaining=ar)
+                 resets_at=_NOW + timedelta(hours=52, minutes=12),
+                 windows=[Window("7d", pct, _NOW + timedelta(hours=52, minutes=12))],
+                 addon_remaining=ar,
+                 plan_end=_NOW + timedelta(days=23, hours=9))
+
+
+def u_go() -> Usage:
+    """M24B 三主条（含日）：5h 62% / 日 35% / 周 18%；大数字=最紧窗剩余 38%。"""
+    r5 = _NOW + timedelta(hours=3, minutes=5)
+    day = _NOW + timedelta(hours=17, minutes=40)
+    wk = _NOW + timedelta(days=4, hours=11)
+    return Usage(provider="opencode_go", ok=True, spec=None, unit="percent",
+                 pct_used=0.62, resets_at=r5,
+                 windows=[Window("5h", 0.62, r5), Window("日", 0.35, day),
+                          Window("周", 0.18, wk)])
 
 
 def u_codex() -> Usage:
-    """演示数据：5h 主条 62%（绿）+ 周主条 30%（M14 双主条）+ 券×1 角标。"""
+    """Codex plus：5h 41% + 周 8% 双主条（大数字 59%）；券×1；积分余额进 tooltip。"""
+    r5, wk = _NOW + timedelta(hours=2, minutes=18), _NOW + timedelta(days=3, hours=7)
     return Usage(provider="codex", ok=True, spec="plus", unit="percent",
-                 pct_used=0.62, resets_at=_NOW + timedelta(hours=2, minutes=1),
-                 windows=[Window("5h", 0.62, _NOW + timedelta(hours=2, minutes=1)),
-                          Window("周", 0.30, _NOW + timedelta(days=4, minutes=7))],
-                 addon_remaining=12.345, note="窗口重置券：可用 1")
+                 pct_used=0.41, resets_at=r5,
+                 windows=[Window("5h", 0.41, r5), Window("周", 0.08, wk)],
+                 addon_remaining=6.25, note="窗口重置券：可用 1")
 
 
 def make_info() -> updater.UpdateInfo:
@@ -160,10 +173,10 @@ def capture_frames(src_dir: Path) -> list[Path]:
         root.update()
         time.sleep(0.4)
 
-        # ---- f1 静置两行（渲染层注入假 Usage，与真数据同路径） ----
-        app.usages = [u_bailian(), u_codex()]
+        # ---- f1 静置三行（渲染层注入假 Usage，与真数据同路径） ----
+        app.usages = [u_bailian(), u_go(), u_codex()]
         app.meta = {"next_delay": 300, "ts": time.time(), "low": False}
-        app.last_good = {"bailian": app.usages[0], "codex": app.usages[1]}
+        app.last_good = {u.provider: u for u in app.usages}
         app._render()
         app._pos = (sx + NOTE_OFF[0], sy + NOTE_OFF[1])         # 记账位先行（_sync_size 用它回写）
         root.geometry(f"+{app._pos[0]}+{app._pos[1]}")
