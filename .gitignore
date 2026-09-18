@@ -12,3 +12,16 @@ __pycache__/
 *.pyc
 build/_pyi/
 *.tmp
+
+# 维护面本地化（GitHub 门面最小化，2026-09-22 用户令，长期有效）
+PLAN.md
+HANDOVER.md
+docs/*.md
+docs/soak_sample.csv
+docs/screenshots/live_now.png
+docs/screenshots/m3c_*.png
+scripts/
+tools/
+build/README.md
+build/icon/make_icon.py
+tests/capture_*.py

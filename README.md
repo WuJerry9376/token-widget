@@ -100,7 +100,7 @@ A Windows sticky-note widget that keeps your LLM subscription quotas on the desk
 
 ## For developers
 
-Python 3.12 + Tkinter, product code stdlib-only. Run from source: `python main.py`; data check: `python cli.py`; full gate: `pwsh -File tests\run_all_m9b.ps1` (10 suites, 187 checks); build: `pwsh -File build\build.ps1` (~20 s → `dist\TokenWidget.exe`, details in [build/README.md](build/README.md)). Wire specs, the complete operations manual and the dev-only asset tools (incl. `tools/make_gif.py`, kept for offline re-shoots; the README no longer embeds the demo GIF) live in [docs/](docs/).
+Python 3.12 + Tkinter, product code stdlib-only. Run from source: `python main.py`; data check: `python cli.py`; full gate: `pwsh -File tests\run_all_m9b.ps1` (187 checks); build: `pwsh -File build\build.ps1` (~20 s → `dist\TokenWidget.exe`). This repository intentionally carries only product code, tests and the storefront screenshots — maintainer docs (wire specs, operations manual, release SOP) live with the primary maintainer and are not mirrored here.
 
 ---
 
