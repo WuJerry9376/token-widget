@@ -123,6 +123,17 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-20 v1.9.0 换装（打包线：M25 全画面去「窗口」+ M26 DPI Per-Monitor v2）**：
+  里程碑 commit `b372c94`（12 文件：main/ui/settings_panel + test_m26_dpi 新套 9 案 +
+  tools/diag 诊断脚本×2 入库[逐文件敏感扫描 CLEAN]；门禁 11 套 **186/186**）；双源升版
+  1.9.0（看门 PASS）。frozen DPI 冒烟：windowed 进程 `GetProcessDpiAwareness procValue==2`
+  （PMv2 生效于交付形态）+ 常驻双进程 responding + 25s 干净自退；fix-8 事故恢复落位
+  核验：实窗 GetWindowRect 与 state.json (2004,24) 一致。注册表 IDENTICAL；MpCmdRun
+  0 检出；守卫四件复布哈希一致；无孤儿/WER。⚠️ **遗留**：M26 跨屏实渲证据为**同 DPI
+  两屏**（本机 100%/100%）+ 量化剖面推演；「真 150% 副屏拖拽实渲」未做（本环境无
+  混合缩放硬件），由 test_m26_dpi 的合成 DPI 变更用例 + PMv2 标准语义覆盖——日后
+  接触混合缩放机器时补一次 diag_m26_xscreen 实拍即可（脚本已入库 tools/diag）。
+  收口：commit + tag v1.9.0 + push + `gh release create v1.9.0`。
 - **2026-09-19 v1.8.3 换装（打包线：M23 百炼套餐到期提示 + M24 层序统一/Go 三主条
   (5h/日/周)/高光绝对阈/去窗字 + M24C 波浪号清除，三里程碑一并入库）**：三里程碑
   commit `5847531`（15 文件，含 capture_m22/m24 入库）；双源升版 1.8.3（看门 PASS）；
