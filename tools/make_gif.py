@@ -1,4 +1,6 @@
-"""M20-A：README 门面主图 docs/screenshots/demo.gif 生成器（dev-only，允许 PIL）。
+"""M20-A：demo.gif 生成器（**离线工具**，dev-only，允许 PIL）。M29 起 README 已下线
+动图（demo.gif 与 docs/screenshots/src/ 帧不再入库）；本工具保留完整重摄能力，
+产物路径不变，若需再上线直接重跑即可。详见 docs/operations.md「门面素材工具」。
 
 用法：
     python tools\\make_gif.py                 # 现场实拍 7 帧 + 合成 gif（需桌面会话）
