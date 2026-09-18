@@ -1311,7 +1311,7 @@ class ProviderKeyPanel(_Card):
     def _build_go(self) -> None:
         app = self.app
         tk.Label(self.body, text=(
-            "Go key 用于拉取 rolling(~5h)/周/月 窗口百分比（官方 usage API）。\n"
+            "Go key 用于拉取 rolling(5h)/周/月 窗口百分比（官方 usage API）。\n"
             "登录过 opencode 的机器可自动检测（auth.json 的 opencode-go 条目）；\n"
             "⚠️ Zen key 不通用（打此端点必 403），自动检测绝不会采用。"),
             justify="left", font=app.f_small, **_tk_colors()).pack(anchor="w")

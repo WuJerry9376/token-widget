@@ -91,6 +91,8 @@ class BailianSource(ProviderSource):
             return self._usage_error(err, r_sub)
         p_sub = r_sub.get("payload") or {}
         spec = p_sub.get("specCode") or p_sub.get("spec_code") or p_sub.get("planName")
+        # M23：subscription.endTime（毫秒 epoch）→ 套餐到期时刻（缺失/坏型 → None=不显示）
+        plan_end = _ms_to_dt(p_sub.get("endTime"))
 
         # 2) quota-config（档位总额）
         r_q = self._call(cookie, f"{gw.API_PREFIX}/quota-config")
@@ -147,6 +149,7 @@ class BailianSource(ProviderSource):
             used=weekly * wk_pct, total=total, remaining=remaining,
             pct_used=wk_pct, resets_at=wk_reset, windows=windows,
             addon_remaining=addon_remaining if addon_ok else None,
+            plan_end=plan_end,
         )
 
     def _call(self, cookie: str, api: str, data_extra: dict | None = None,

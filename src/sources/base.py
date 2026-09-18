@@ -27,6 +27,7 @@ class Usage:
     - pct_used：主窗口已用百分比（0..1），百炼=per1WeekPercentage
     - addon_remaining：附加包（百炼用量包）剩余合计，单独展示用
     - note：可选单行补充文案（tooltip 有则显，无则不显；无 PII、无凭据值）
+    - plan_end：M23 套餐到期时刻（subscription.endTime；仅百炼填，其余恒 None=零占位）
     - stale_from_ok：上层缓存降级标记（失败后保留最后成功值灰显），采集层不写
     """
 
@@ -42,6 +43,7 @@ class Usage:
     windows: list[Window] = field(default_factory=list)
     addon_remaining: float | None = None
     note: str | None = None           # 单行补充信息（M10b：如窗口重置券计数）；UI tooltip 有则显
+    plan_end: datetime | None = None  # M23：订阅/套餐到期时刻（aware dt；通用字段命名，当前仅百炼填）
     error_code: str | None = None
     error_msg: str | None = None
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

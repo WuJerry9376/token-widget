@@ -275,6 +275,46 @@ def a6_envelope_no_datav2(app, checks):
     assert "暂无可显示的历史数据" in texts_join(app)
 
 
+def a11_subscription_endtime_to_plan_end(app, checks):
+    """M23：百炼 subscription.endTime（毫秒 epoch）→ Usage.plan_end；缺省/坏型→None。
+    其余 source 不动恒 None（合成 Usage 不经 bailian 路径，plan_end 默认零占位）。"""
+    import time as _t
+    future_ms = int((_t.time() + 30 * 86400) * 1000)
+    base_posts = {
+        "quota-config": {"http": 200, "api": "quota-config",
+                         "env": env_ok({"pro": {"weekly": 40000.0}})},
+        "usage": {"http": 200, "api": "usage",
+                  "env": env_ok({"per1WeekPercentage": 61.2,
+                                 "per1WeekResetTime": future_ms})},
+        "list": {"http": 200, "api": "addon/list", "env": env_ok({"items": []})},
+    }
+    posts = {**base_posts, "subscription": {"http": 200, "api": "subscription",
+                                            "env": env_ok({"specCode": "pro",
+                                                          "endTime": future_ms})}}
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+        assert u.ok, (u.error_code, u.error_msg)
+        assert u.plan_end is not None and abs(u.plan_end.timestamp() * 1000 - future_ms) < 1000
+        # 缺 endTime / 坏型字符串 → None（不崩、零占位）
+        posts["subscription"] = {"http": 200, "api": "subscription",
+                                 "env": env_ok({"specCode": "pro"})}
+        u2 = BailianSource().fetch()
+        assert u2.ok and u2.plan_end is None
+        posts["subscription"] = {"http": 200, "api": "subscription",
+                                 "env": env_ok({"specCode": "pro", "endTime": "not-a-ts"})}
+        u3 = BailianSource().fetch()
+        assert u3.ok and u3.plan_end is None
+    finally:
+        undo()
+    # 渲染兼容：plan_end 有值的错误/stale 路径不炸（错误 Usage 默认 None）
+    reset(app)
+    err = Usage(provider="bailian", ok=False, error_code="NETWORK", error_msg="t")
+    assert err.plan_end is None, "错误路径默认零占位"
+    feed(app, err)
+    assert app._row_infos()[0]["kind"] in ("err", "full")
+
+
 def a7_all_providers_error(app, checks):
     # M11a：合成 provider 样本由 openai 换 opencode_go（OpenAI 行已退场）
     reset(app)
@@ -485,6 +525,7 @@ CASES = [("A1", a1_login_expired_with_history), ("A2", a2_login_expired_no_histo
          ("A5", a5_usage_missing_percentage_key), ("A6", a6_envelope_no_datav2),
          ("A7", a7_all_providers_error), ("A8", a8_cookie_panel_rejects_no_equals),
          ("A9", a9_poll_race), ("A10", a10_http_semantics),
+         ("A11-plan_end", a11_subscription_endtime_to_plan_end),
          ("T-kick", t11_kick_wakes_immediately),
          ("T-kick-idempotent", t12_kick_coalesced_no_storm)]
 

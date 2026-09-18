@@ -11,6 +11,8 @@ fixture 驱动零真实网络（用户尚无 key，验收=离线规格对点，w
 覆盖（任务书 F）：双字段变体（percent|usagePercent、resetsAt ISO|epoch、resetInSec）、
 EntitlementError 403 body 判定、Zen key 绝不自动采用、rate-limited→100%、weekly 缺省
 不渲染、auth 通用 secret 往返+原子性、设置面板新控件渲染/保存/清空/不回显、ui 两 unit 行渲染。
+M24B（2026-09-18）：Go 行升多主条（5h/日/周/月，全画面禁「窗」字扫描）；source 侧
+86400→「日」映射 + windowSeconds 优先 + 固定序 5h→日→周→月（other 尾置）——g12/g13/u5。
 M11a（2026-09-15）：OpenAI API 侧移除——本套件 openai 面板两案例（s2/s3）原地改造为
 Codex 面板形态样本；s1 勾选对象与旁注计数同步（4→3）。
 """
@@ -128,7 +130,7 @@ def g1_api_variant_iso():
     assert u.ok and u.unit == "percent", (u.error_code, u.error_msg)
     assert u.total is None and u.remaining is None, "%语义无绝对额"
     assert abs(u.pct_used - 0.425) < 1e-9, u.pct_used          # 0..100 → 0..1
-    assert [w.label for w in u.windows] == ["rolling", "weekly"], u.windows
+    assert [w.label for w in u.windows] == ["5h", "周"], u.windows   # M24B：显示 label
     assert u.resets_at == datetime.fromisoformat(iso.replace("Z", "+00:00"))
     assert u.resets_at.tzinfo is not None
     assert stub.calls[0][1]["Authorization"] == "Bearer " + GO_KEY
@@ -142,7 +144,7 @@ def g2_dashboard_variant():
     before = time.time()
     u = fresh_go().fetch()
     assert u.ok and abs(u.pct_used - 0.37) < 1e-9, u.pct_used
-    assert len(u.windows) == 1 and u.windows[0].label == "rolling"
+    assert len(u.windows) == 1 and u.windows[0].label == "5h"    # M24B 字段兜底 label
     delta = (u.resets_at - datetime.now(timezone.utc)).total_seconds()
     assert 3590 < delta < 3610, (before, delta)
     return "usagePercent 37→0.37；resetInSec→now+3600s"
@@ -274,6 +276,41 @@ def g11_cache_ttl():
     src.fetch()
     assert len(stub.calls) == 2
     return "60s 缓存 + 过期重拉"
+
+
+def g12_daily_label_and_fixed_order():
+    """M24B：daily 字段→「日」；windowSeconds 优先映射（18000→5h/86400→日）；
+    windows 固定序 5h→日→周→月（响应乱序也重排）。"""
+    auth.save_secret("opencode_go_key", GO_KEY)
+    iso = "2026-09-11T18:30:00.123456Z"
+    body = go_body({"usage": {                       # 故意乱序下发
+        "monthly": {"percent": 90, "resetsAt": iso},
+        "weekly": {"percent": 18, "resetsAt": iso},
+        "daily": {"percent": 35, "resetsAt": iso, "windowSeconds": 86400},
+        "rolling": {"percent": 62, "resetsAt": iso, "windowSeconds": 18000}}})
+    set_resp(lambda url, h, n: body)
+    u = fresh_go().fetch()
+    assert u.ok, (u.error_code, u.error_msg)
+    assert [w.label for w in u.windows] == ["5h", "日", "周", "月"], u.windows
+    assert abs(u.pct_used - 0.62) < 1e-9 and u.resets_at is not None, "主行仍=rolling"
+    assert abs(u.windows[1].pct_used - 0.35) < 1e-9, u.windows[1]
+    return "日字段+秒数映射（86400→日）+固定序 5h→日→周→月"
+
+
+def g13_other_tail_and_no_seconds_legacy():
+    """M24B 防御面：未知秒数（21600）→ other:<sec> 尾置；无秒数字段（spec §2.2 现状）
+    行为与旧版同构（字段名兜底），宁缺勿错、不造数据。"""
+    auth.save_secret("opencode_go_key", GO_KEY)
+    set_resp(lambda url, h, n: go_body({"usage": {
+        "weekly": {"percent": 20},
+        "rolling": {"percent": 10, "windowSeconds": 21600}}}))
+    u = fresh_go().fetch()
+    assert u.ok and [w.label for w in u.windows] == ["周", "other:21600"], u.windows
+    assert abs(u.pct_used - 0.1) < 1e-9, "主行 pct 仍取 rolling（与 label 排序无关）"
+    set_resp(lambda url, h, n: usage_json({"percent": 10}, weekly={"percent": 20}))
+    u2 = fresh_go().fetch()
+    assert [w.label for w in u2.windows] == ["5h", "周"], u2.windows
+    return "other:<sec> 尾置；无秒数字段=旧行为（宁缺勿错）"
 
 
 # ---------------------------------------------------- auth 通用用例 ----
@@ -488,7 +525,8 @@ def s4_go_panel_detect_paste(app, root):
     assert auth.load_secret("opencode_go_key") == GO_KEY
     panel._validate()
     st = panel.status.cget("text")
-    assert "验证成功" in st and "~5h" in st and panel.status.cget("fg").lower() == OK.lower(), st
+    assert "验证成功" in st and "5h" in st and "~5h" not in st \
+        and panel.status.cget("fg").lower() == OK.lower(), st   # M24C：波浪号删除
     for t in _all_texts(panel, []):
         key_never_leaks(t)
     panel.destroy()
@@ -512,19 +550,86 @@ def u1_usd_rows(app, root):
 
 
 def u2_percent_row(app, root):
-    """E：percent 大数字=剩余占比；~5h/周/月多窗副显各带倒计时。"""
-    feed(app, Usage(provider="opencode_go", ok=True, unit="percent",
-                    pct_used=0.4, resets_at=_NOW + timedelta(hours=2),
-                    windows=[Window("rolling", 0.4, _NOW + timedelta(hours=2)),
-                             Window("weekly", 0.7, _NOW + timedelta(days=2)),
-                             Window("monthly", 0.9, _NOW + timedelta(days=9))]))
+    """M24B：Go 行=多主条块（5h/日/周 从上到下，有几窗画几条）；
+    大数字=剩余占比·最紧窗口径；条行短名一律无「窗」字；旧字段名 fixture 归一。"""
+    def go(*wins, pct=None):
+        return Usage(provider="opencode_go", ok=True, unit="percent",
+                     pct_used=pct if pct is not None else wins[0].pct_used,
+                     resets_at=wins[0].resets_at, windows=list(wins))
+    u3 = go(Window("5h", 0.4, _NOW + timedelta(hours=2)),
+            Window("日", 0.6, _NOW + timedelta(hours=18)),
+            Window("周", 0.7, _NOW + timedelta(days=2)), pct=0.4)
+    feed(app, u3)
     labels = texts_join(app)
-    assert "~5h 窗口 · 已用 40.0%" in labels, labels       # rolling→~5h
-    assert "周 窗口 · 已用 70.0%" in labels and "月 窗口 · 已用 90.0%" in labels
-    assert "（周）" in labels and "（月）" in labels, "各窗倒计时后缀"
-    big = [t for t, _ in text_items(app) if t == "60%"]
-    assert big, "大数字=剩余占比 60%"
-    assert fill_of(app, "60%") == INK.lower()
+    assert "5h · 已用 40.0%" in labels and "日 · 已用 60.0%" in labels \
+        and "周 · 已用 70.0%" in labels, labels
+    assert "30%" in labels, "大数字=最紧窗剩余占比（1−70%）"
+    assert fill_of(app, "30%") == INK.lower()
+    c = app.canvas
+
+    def top_of(txt_start):
+        return min(c.bbox(i)[1] for i in c.find_all() if c.type(i) == "text"
+                   and str(c.itemcget(i, "text")).startswith(txt_start))
+
+    assert top_of("5h · 已用") < top_of("日 · 已用") < top_of("周 · 已用"), \
+        "块序：5h 上、日中、周下"
+    # 三根等尺寸条（9px 主条语言），非旧副显文字行
+    tracks = [c.bbox(i) for i in c.find_all()
+              if c.type(i) == "rectangle"
+              and str(c.itemcget(i, "fill")).lower() == "#e3d3a9"]
+    assert len(tracks) >= 3, f"Go 三窗应三根条：{len(tracks)}"
+    heights = sorted(round(b[3] - b[1], 1) for b in tracks)
+    assert heights[0] > 8 * app.S, "条高=主条 9px 级（等尺寸，非 5.4px 细条）"
+    # 旧字段名 fixture（rolling/weekly/monthly）仍归一渲染 + 排序正确
+    feed(app, go(Window("rolling", 0.4, _NOW + timedelta(hours=2)),
+                 Window("weekly", 0.7, _NOW + timedelta(days=2)),
+                 Window("monthly", 0.9, _NOW + timedelta(days=9)), pct=0.4))
+    labels = texts_join(app)
+    assert "5h · 已用 40.0%" in labels and "周 · 已用 70.0%" in labels \
+        and "月 · 已用 90.0%" in labels, labels
+    assert "10%" in labels, "大数字=最紧窗剩余（1−90%）"
+    # 窗数矩阵高度账：1/2 窗等高（ROW_FULL 全收），第 3 窗起 +GO_BAR_PITCH(28)
+    S = app.S
+    h1 = (feed(app, go(Window("5h", 0.4, _NOW + timedelta(hours=2)), pct=0.4)),
+          float(c.cget("height")))[1]
+    h2 = (feed(app, go(Window("5h", 0.4, _NOW + timedelta(hours=2)),
+                       Window("周", 0.7, _NOW + timedelta(days=2)), pct=0.4)),
+          float(c.cget("height")))[1]
+    h3 = (feed(app, u3), float(c.cget("height")))[1]
+    assert abs(h1 - h2) < 1.0, (h1, h2, "两窗与单窗等高（同 codex M14 高度账）")
+    assert abs((h3 - h2) - 28 * S) <= 2.0, (h2, h3, "第 3 窗 +28·S")
+    # 全画面禁「窗」字扫描（条行 label 与大数字一律无「窗」）
+    for t, _f in text_items(app):
+        assert "窗" not in str(t), f"画面出现「窗」字：{t!r}"
+
+
+def u5_go_codex_no_win_char_scan(app, root):
+    """M24B 全画面禁字：Go(3窗)+Codex(5h/周·含券) 同屏——codex「周窗」已同步改「周」。
+    注：百炼通用行的「7d 窗口 · 已用」不在本裁决范围（M24B 只裁决条行/Go/codex 短名）。"""
+    feed(app,
+         Usage(provider="opencode_go", ok=True, unit="percent", pct_used=0.62,
+               resets_at=_NOW + timedelta(hours=3),
+               windows=[Window("5h", 0.62, _NOW + timedelta(hours=3)),
+                        Window("日", 0.35, _NOW + timedelta(hours=20)),
+                        Window("周", 0.18, _NOW + timedelta(days=4))]),
+         Usage(provider="codex", ok=True, spec="plus", unit="percent", pct_used=0.41,
+               resets_at=_NOW + timedelta(hours=2, minutes=18),
+               windows=[Window("5h", 0.41, _NOW + timedelta(hours=2, minutes=18)),
+                        Window("周", 0.08, _NOW + timedelta(days=3, hours=7))],
+               note="窗口重置券：可用 1"))
+    labels = texts_join(app)
+    assert "周 · 已用 8.0%" in labels and "5h · 已用 41.0%" in labels, \
+        "codex 块2 短名去窗：" + labels
+    assert "5h · 已用 62.0%" in labels and "日 · 已用 35.0%" in labels \
+        and "周 · 已用 18.0%" in labels, labels
+    assert "券×1" in labels, "note 只进 tooltip，画面仅角标"
+    for t, _f in text_items(app):
+        assert "窗" not in str(t), f"画面出现「窗」字：{t!r}"
+    # M24C：Go 条行短名去波浪号——画面零「~5h」（禁字扫描扩到「~」字符本身）
+    bar = [str(t) for t, _f in text_items(app)
+           if "· 已用" in str(t) and str(t).startswith(("5h ", "日 ", "周 ", "月 "))]
+    assert len(bar) == 5 and all("~" not in t for t in bar), bar
+    return "Go3窗+Codex 同屏全画面无「窗」字、条行零「~」"
 
 
 def u3_cred_and_stale_tiers(app, root):
@@ -580,9 +685,10 @@ def tk_section(app, root, checks) -> None:
                      ("codex_panel_ok", s2_codex_panel_save_clear_verify),
                      ("codex_panel_fail", s3_codex_panel_verify_fail),
                      ("go_panel_detect_paste", s4_go_panel_detect_paste),
-                     ("ui_usd_rows", u1_usd_rows),
-                     ("ui_percent_rows", u2_percent_row),
-                     ("ui_cred_stale", u3_cred_and_stale_tiers)]:
+                      ("ui_usd_rows", u1_usd_rows),
+                      ("ui_percent_rows", u2_percent_row),
+                      ("ui_go_codex_no_win_scan", u5_go_codex_no_win_char_scan),
+                      ("ui_cred_stale", u3_cred_and_stale_tiers)]:
         case(name, fn)
 
 
@@ -642,6 +748,8 @@ def run(tmp: Path) -> int:
                          ("g9_zen_key_never_auto", g9_zen_key_never_auto),
                          ("g10_auto_detect_off", g10_auto_detect_off),
                          ("g11_cache_ttl", g11_cache_ttl),
+                         ("g12_daily_label_fixed_order", g12_daily_label_and_fixed_order),
+                         ("g13_other_tail_legacy", g13_other_tail_and_no_seconds_legacy),
                          ("a1_secret_roundtrip", a1_secret_roundtrip),
                          ("a2_detect_variants", a2_detect_variants)]:
             case(name, fn)

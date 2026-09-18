@@ -61,7 +61,7 @@ usage.weekly.* / usage.monthly.* : 可选同构
 （可选 renewAt 订阅续费时间）
 ```
 - ⚠️ Web dashboard 变体是 `usagePercent`+`resetInSec`（整数秒）——**不同源不混用**；本实现按 API 变体读，遇 `usagePercent` 形态做兼容兜底（风险②）。
-- ⚠️ rolling 窗口时长不在响应中，显示按服务端语义"~5h"文案（风险⑥）。
+- ⚠️ rolling 窗口时长不在响应中，显示按服务端语义"5h"文案（风险⑥；M24C 起去波浪号）。
 - 绝对 $/token 不下发（ZEN_LIMITS 服务端秘密）→ 行只显示 % + 倒计时。
 - 校验：rolling 必须存在；weekly/monthly 缺省则不渲染该窗（与百炼 5h 策略同构）。
 - 轮询：≥60s；限流常量为工程默认，非官方 SLA。

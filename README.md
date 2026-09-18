@@ -116,7 +116,7 @@ python cli.py                     # console view of the same collected data
 
 | 供应商 | 显示 | 数据源 | 备注 |
 |---|---|---|---|
-| 百炼个人版 | 7 天周期剩余 Credits + 重置倒计时；有 5h 数据时自动副显；加油包单列 | 控制台网关（非官方契约，移植 CodexBar/OmniRoute 实测逻辑，见 `docs\bailian_gateway_spec.md`） | Cookie 过期会提示重贴 |
+| 百炼个人版 | 7 天周期剩余 Credits + 重置倒计时；有 5h 数据时自动副显；加油包单列；分项行尾附「套餐 MM-DD 到期」（subscription.endTime；≤7 天转橙、≤3 天转红，跨年带年份；Go/Codex 无此字段永不显示） | 控制台网关（非官方契约，移植 CodexBar/OmniRoute 实测逻辑，见 `docs\bailian_gateway_spec.md`） | Cookie 过期会提示重贴；完整到期日+剩余天数在 tooltip |
 | OpenCode Go | 5h/周/月窗口已用 % + 倒计时 | `zen/go/v1/usage`（Go key，`~/.local/share/opencode/auth.json` 的 `opencode-go` 条目） | 无绝对额度下发 |
 | Codex（实验性） | 5h/周窗口已用 % + 重置倒计时；积分/重置券进 tooltip | ChatGPT 订阅 OAuth（见 A3） | 非官方接口，可能随时失效 |
 

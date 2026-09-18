@@ -5,13 +5,20 @@
   斜向点状细纹模拟纸纤维，顶沿高光/底沿暗线做微立体。
 - 单一 Canvas 绘制（tk 子窗口不能透明，避免圆角穿帮），数据变化整体重绘。
 - 阈值着色：剩余 <15% 黄、<5% 红（config.low_yellow_pct / low_red_pct）。
-- 主行外的多余 windows（百炼 "5h"；M6 Go weekly/monthly）自动副显，接口不返回即完全不占位
-  （PLAN §7-Q5 推广为「按 windows 条数渲染」）。
+- M23 套餐到期：百炼 C 行分项尾部追加「 · 套餐 MM-DD 到期」（plan_end 空=零占位；
+  跨年显全日期；≤7 天 ORANGE、≤3 天含过期 RED、平时 SOFT_TXT；stale 旧值行
+  日期照常但随灰 FAINT；宽不足截主文保后缀，兜不住则后缀整体不显——同「按周期计」
+  降级律；tooltip 恒显完整日期+剩余天数）。仅百炼：其余 source plan_end 恒 None。
+- 主行外的多余 windows（百炼 "5h"）自动副显，接口不返回即完全不占位
+  （PLAN §7-Q5 推广为「按 windows 条数渲染」）。M24B 起 Go 不再走副显——升级
+  多主条块（与 Codex M14 同语法，5h/日/周/月 全量出条，从上到下）。
 - M7-a 加油包细条：主条下方第二根细条（BADGE 中性色、无阈值语义），仅当有 ACTIVE 包时出现、
   否则零占位；总量由「total − 推导周期量」得出，明细进 tooltip。
 - M7-b 刷新图标：标题行状态文字左侧手绘 ↻（Canvas 弧 + 切线箭头，非系统符号），点击=「立即刷新」
   同一路径；悬停底色加深一档；拉取期间 60°/步旋转（after 循环、主线程、回包或 30s 超时自停）。
   M12④ 起笔画改 4× 超采样 PhotoImage 光栅（Tk 无抗锯齿的替代；几何/热区/旋转时序语义不变）。
+  M24A 层序定案：图标族（rotbg+图）恒压在纸纹之上、文字之下——items 后于纹理创建，
+  初始渲染与旋转帧/hover 同走 _rot_raise 单一收口，任何时刻所见层序一致。
 - M9 屏幕边缘自吸附（行为特性，无开关）：拖拽释放时窗口任一边距所在显示器工作区对应边
   ≤ SNAP_PX（28 逻辑px，随 DPI 缩放）→ 贴齐该边（与工作区边缘 0 间距；顶边贴工作区顶，
   任务栏避让由 work_area 天然处理）；横纵独立判定，可同吸成贴角。目标屏 = 窗口面积占比
@@ -29,15 +36,22 @@
   （条-条实距 19px；1.7× 组内，Gestalt 亲近性分组清晰）；整组收在 ROW_FULL=100 内
   （原细条方案 114 → 100，第二条借用旧细条+C 行空档，行高零增）。
 - M11d 固定槽与去「窗」：主条恒=5h、副细条恒=周（与松紧解耦，缺位递补：无 5h 周升
-  主条、无周仅主条）；5h 短名去「窗」→「5h · 已用 x%」（周维持「周窗」）；
+  主条、无周仅主条）；5h 短名去「窗」→「5h · 已用 x%」；
   大数字口径随主条窗剩余占比（所见即所得），黄/红仍各窗独立判（副条自着色兜紧迫度）。
+- M24 用户实测四修：A ↻ 图标族层序恒定居中（纸纹之上、文字之下；纹理后创建 +
+  _rot_raise 单一收口，初始渲染与旋转/hover 同路）；B Go 行升多主条（source 侧
+  86400→「日」映射与 5h→日→周→月固定序，有几窗画几条；条行短名一律无「窗」字，
+  codex 残留「周窗」同步改「周」；大数字=剩余占比·最紧窗口径；行高第 3 窗起
+  每窗 +GO_BAR_PITCH=28，与 codex 高度账同族）；C 条内高光线改绝对像素阈
+  （填充宽 ≥BAR_HI_MIN_PX=24 逻辑 px 才画，替代 M7b⑤「<15% 轨宽」——双主条
+  并排观感一致：小窗两条都无、大窗两条都有）。
 - M11c 第 5 轮视觉打磨：①codex 窗短名「周窗」（去「周 窗口」拼接空格；5h 由 M11d 去「窗」），
   副细条尾注整句统一 f_note 浅灰常规（原 f_tiny 下 CJK「后重置」视觉比数字重一档）；②券×N
   字重与 PLUS 同档（SOFT 灰褐，角标是配角）；③细条方向语义定案：主条一律**已用向**；
   细条一律**图文同向、右文案自带方向锚字**——codex 副细条右「已用 x% · …」（已用向），
   加油包细条右「剩 X / Y」（剩余向，des-2 定案）——两根细条方向相反不再靠猜，锚字为准。
 - M6 单位语义：unit=="usd" 大数字=剩余/余额（$ 两位小数），副行「近30天已用 / 预算|余额」；
-  unit=="percent" 大数字=剩余占比（分母 100），rolling 显示文案「~5h」。
+  unit=="percent" 大数字=剩余占比（分母 100），rolling 显示文案「5h」。
 - M9b usd 无余额态：admin key 采得到已用但无余额视图（remaining=None 且 used 有真实值）→
   大数字=近30天已用（$0.00 只能来自真实 used=0，None 绝不渲染成假值）、单位小字改「近30天已用」、
   副行不再重复已用，改分母指引「未设预算 · 绑定普通 key 可看余额」；percent/credits 型不动。
@@ -90,6 +104,7 @@ BADGE_BG = "#F3E9CD"
 BADGE_EDGE = "#DAC8A0"
 ADDON_FILL = "#C2A878"     # M7b③：加油包细条填充（略深卡其；与主条空轨 #E3D3A9 拉开 ΔRGB≈(33,43,49)）
 BAR_HI = "#FFFBEB"
+BAR_HI_MIN_PX = 24         # M24C：内高光线绝对像素阈（填充宽 ≥ 此逻辑 px 才画）
 MENU_BG = "#FBF6E7"
 MENU_HL = "#EFE1BE"
 TIP_BG = "#3B3527"
@@ -123,8 +138,16 @@ CRED_ERRORS = {"LOGIN_EXPIRED", "NO_CREDENTIAL", "KEY_INVALID", "NO_SUBSCRIPTION
 SNAP_PX = 28           # 吸附触发距离：释放位与工作区边距 ≤ 此值 → 贴齐该边（0 间距）
 SNAP_FRAMES = 3        # 滑动帧数（ease-out 二次，总时长 ≈ SNAP_FRAMES*SNAP_STEP_MS ≈ 90ms）
 SNAP_STEP_MS = 30      # 帧间隔 ms
-# 窗口 label 的显示文案（Go API 变体 rolling → 服务端语义 "~5h"，spec §2.2 风险⑥）
-WIN_LABELS = {"rolling": "~5h", "weekly": "周", "monthly": "月"}
+# 窗口 label 的显示文案（Go API 变体 rolling → 显示语义 "5h"，spec §2.2 风险⑥；
+# M24C 起去波浪号，与 Codex 短名统一）。
+# M24B 起 Go source 直接下发显示 label（5h/日/周/月），此表保留旧字段名兜底
+# （历史 fixture / 缓存数据仍经此归一）。
+WIN_LABELS = {"rolling": "5h", "daily": "日", "weekly": "周", "monthly": "月"}
+
+
+def win_label(label: str) -> str:
+    """原始 label → 显示 label（未知值透传）。"""
+    return WIN_LABELS.get(label, label)
 
 
 def spec_display(u: Usage) -> str:
@@ -166,6 +189,28 @@ def codex_bars(u: Usage) -> tuple[Window | None, Window | None]:
     return main, sec
 
 
+# ---------- M24B Go 行多主条（与 Codex M14 同语法；纯函数可单测） ----------
+
+GO_BAR_PITCH = CODEX_TXT_BAR + 9 + CODEX_GAP    # 28：块行距（文字→条7 + 条9 + 组间12）
+
+
+def go_bars(u: Usage) -> list[Window]:
+    """Go 行取条：windows 全量按固定序 5h→日→周→月（other/未知尾置）出多主条。
+
+    provider 非 Go 或无 windows → []（调用方回落通用渲染，数据不丢）。
+    source 已在采集层排好序，这里二次排序只是对旧数据/手写 fixture 的归一保险。"""
+    if u.provider != "opencode_go" or not u.windows:
+        return []
+    order = {lab: k for k, lab in enumerate(("5h", "日", "周", "月"))}
+    return sorted(u.windows, key=lambda w: order.get(win_label(w.label), len(order)))
+
+
+def go_tightest_pct(bars: list[Window]) -> float | None:
+    """大数字口径（M24B）：最紧窗的已用 pct（=各窗 pct 最大者）；全未知 → None。"""
+    pcts = [w.pct_used for w in bars if w.pct_used is not None]
+    return max(pcts) if pcts else None
+
+
 def codex_ticket_count(u: Usage) -> int | None:
     """重置券角标数：note「窗口重置券：可用 N」→ N；无 note/无数字/非 codex → None（不占位）。
 
@@ -177,12 +222,12 @@ def codex_ticket_count(u: Usage) -> int | None:
 
 
 def codex_win_caption(label: str) -> str:
-    """M11c①/M11d② codex 行窗短名：周→「周窗」；5h 保持「5h」（用户点名去「窗」）。
+    """M11c①/M11d②/M24B 条行窗短名：一律**无「窗」字**——「周窗」→「周」，
+    5h/日 原样（M24B 把 codex 最后残留的「周窗」也去了；Go 多主条同用本函数）。
 
-    仅 codex 双条支路使用；通用行（百炼/Go）的「{label} 窗口 · 已用」拼接不动。"""
-    if label == "5h":
-        return label
-    return label if label.endswith("窗") else f"{label}窗"
+    仅多主条支路（codex/Go）使用；通用行（百炼）的「{label} 窗口 · 已用」拼接不动。"""
+    lab = win_label(label)
+    return lab[:-1] if lab.endswith("窗") and len(lab) > 1 else lab
 
 
 # ---------- 纯格式化函数（渲染层之外可单测） ----------
@@ -281,6 +326,46 @@ def breakdown_display(u: Usage) -> tuple[str, str | None]:
     left = (f"剩余 {big} / 总 {math.floor(u.total):,}" if u.total is not None
             else f"剩余 {big}")
     return big, left
+
+
+# ---------- M23：套餐到期提示（C 行分项尾部后缀；仅百炼——其余 source plan_end 恒 None） ----------
+
+PLAN_WARN_DAYS = 7        # 距到期 ≤7 自然日 → 整段日期文字转橙
+PLAN_URGENT_DAYS = 3      # ≤3 自然日（含已过期）→ 转红
+
+
+def plan_end_display(u: Usage, now: datetime | None = None) -> tuple[str, str] | None:
+    """返回 (后缀文本, 文字色) 或 None（plan_end=None → 零占位，行布局不变）。
+
+    文本 = " · 套餐 09-28 到期"（与今天同年，MM-DD 无歧义省年份）；跨年显全
+    " · 套餐 2027-01-05 到期"。色档按**本地自然日**差（负=已过期按最紧迫）：
+    ≤PLAN_URGENT_DAYS → RED、≤PLAN_WARN_DAYS → ORANGE、其余 SOFT_TXT（与该
+    C 行同档）。stale 降灰由渲染层覆写（旧值随灰，紧急档也不例外，日期照常显示）。"""
+    pe = _local(u.plan_end)
+    if pe is None:
+        return None
+    ref = _local(now) or datetime.now().astimezone()
+    days = (pe.date() - ref.date()).days
+    d_txt = f"{pe:%m-%d}" if pe.year == ref.year else f"{pe:%Y-%m-%d}"
+    col = RED if days <= PLAN_URGENT_DAYS else (ORANGE if days <= PLAN_WARN_DAYS
+                                                else SOFT_TXT)
+    return f" · 套餐 {d_txt} 到期", col
+
+
+def plan_end_split(left: str, tail: str, measure, avail: float,
+                   ellipsis: str = "…") -> tuple[str, str | None]:
+    """C 行宽度守卫（纯函数）：主文+后缀放得下→原样；放不下→**截主文保后缀**
+    （到期是用户价值增量，截断该截断的）；连截断位都不够→后缀不显（返回
+    (原文, None)，与「（按周期计）」守卫同律降级）。measure=callable(str)->px。"""
+    if not tail or measure(left) + measure(tail) <= avail:
+        return left, tail if tail else None
+    budget = avail - measure(tail)
+    base = left
+    while base and measure(base + ellipsis) > budget:
+        base = base[:-1]
+    if base:
+        return base + ellipsis, tail
+    return left, None
 
 
 def addon_bar_state(u: Usage) -> tuple[bool, float | None, int]:
@@ -602,13 +687,15 @@ class NoteApp:
     # 方案：几何与原手绘一致（300° 圆环扇段 + 切线箭头三角，a0=70+rot），但对每个
     # 物理像素取 4×4 子点解析判覆盖 → 笔画 premultiply 到纸底 PAPER 后 PhotoImage.put。
     # Tk 8.6 PhotoImage 无 per-pixel alpha（实测 truecolor/#RRGGBBAA 均不支持）→
-    # 不能用"背景填色键再抠透明"（透明色键会透桌面）。改为图标**先于纸纹点阵创建
-    # （under-texture）**：图底 PAPER 与纸面同色、纸纹点在其上照常穿过 → 无接缝、
-    # 不透桌面、不遮纹理；bbox 紧裁到墨迹外推 0.5px（半宽=ceil(√(rr²+s²)+线宽/2+.5)），
+    # 不能用"背景填色键再抠透明"（透明色键会透桌面）。M24A 定案：图标**后于纸纹点阵
+    # 创建并经 _rot_raise 恒序收口**（压在纹理之上、文字之下）——旧 under-texture 方案
+    # 让虚线栅格穿过图标，在初始渲染与旋转/hover 重绘之间漂移层序（用户实测可见）。
+    # 图底 PAPER 与纸面同色、点阵间距 11px 稀疏，bbox 内遮蔽 ≤ 个位数 1px 点，无接缝、
+    # 不透桌面；bbox 紧裁到墨迹外推 0.5px（半宽=ceil(√(rr²+s²)+线宽/2+.5)），
     # 不越顶边 20px 条带判据（icy=P(34)，半高≤15@200% → 上缘≥24px 物理）。
     # 旋转动画：启动后首轮渲染一次性生成 6 档（0/60/…/300°）PhotoImage（6×21²×16
     # 子点≈42k 次判定，毫秒级，实测见 verbose），_repaint_rot 只做 itemconfigure 换图
-    # ——不再删体重绘，层序恒定。hover rotbg / 点击热区 / 旋转时序语义零改动。
+    # + _rot_raise（单一收口）。hover rotbg / 点击热区 / 旋转时序语义零改动。
 
     _SS = 4                       # 每像素 4×4 子点
     _ROT_IMGS: dict[tuple, dict[int, tk.PhotoImage]] = {}   # (master,S档) → {角度:图}
@@ -911,6 +998,11 @@ class NoteApp:
                              f"（条长=剩余占比；多个 ACTIVE 包已合并，明细见控制台）")
             else:
                 lines.append(f"加油包剩余：{ad_f:,}")
+        if u.plan_end is not None and (pe_t := _local(u.plan_end)) is not None:
+            # M23：完整到期日+剩余天数（C 行只显 MM-DD 短式，此处全式）
+            _days = (pe_t.date() - datetime.now().astimezone().date()).days
+            lines.append(f"套餐到期：{pe_t:%Y-%m-%d %H:%M}（"
+                         + ("已到期" if _days < 0 else f"剩 {_days} 天") + "）")
         if u.note:                              # M10b：单行补充（如窗口重置券），无则不显
             lines.append(u.note)
         lines.append(f"拉取于 {fmt_clock(u.fetched_at)} · 下轮 "
@@ -1208,15 +1300,17 @@ class NoteApp:
              track: str = TRACK, edge: str = TRACK_EDGE) -> None:
         """进度条（填充=已用比例；加油包细条传入的是「剩余占比」，与自身文案同向）。
 
-        M7-a：track/edge 可覆写。M7b⑤：填充宽度 <15% 时跳过内高光线——
-        小填充上 1px 白横显脏（真实数据 5.3% 处观察到）。"""
+        M7-a：track/edge 可覆写。M7b⑤→M24C：内高光线改**绝对像素阈**——填充宽
+        ≥BAR_HI_MIN_PX(24 逻辑px，随 DPI 缩放) 才画。旧「<15% 轨宽」在双主条并排时
+        产生观感不一致（330 宽下 ≈44px 才画，8% 周条与 41% 5h 条一边有无）；
+        绝对阈下同一屏两根条按同一把尺子判定，小窗两条都无、大窗两条都有。"""
         c = self.canvas
         self._pill(x, y, x + w, y + h, fill=track, outline=edge, width=1)
         if pct_used is None or pct_used <= 0:
             return
         pw = max(h, w * min(1.0, pct_used))
         self._pill(x, y, x + pw, y + h, fill=color)
-        if pw < w * 0.15:
+        if pw < self._p(BAR_HI_MIN_PX):
             return
         c.create_line(x + h / 2, y + h * 0.28, x + pw - h / 2, y + h * 0.28,
                       fill=BAR_HI, width=max(1, int(self.S)))
@@ -1271,6 +1365,14 @@ class NoteApp:
                     h += ROW_CRED
                 return h
             # 全未知窗（other:N 独苗等异常套餐）→ 落通用路径，数据不丢
+        if u.provider == "opencode_go" and u.windows:
+            # M24B Go 多主条：两窗以内 ROW_FULL 全收（同 codex 高度账），
+            # 第 3 窗起每多一窗 +GO_BAR_PITCH（28px，与块行距同值）
+            n = len(go_bars(u))
+            h = ROW_FULL + GO_BAR_PITCH * max(0, n - 2)
+            if info["cred"] or info["stale"]:
+                h += ROW_CRED
+            return h
         h = ROW_FULL + ROW_5H * self._extra_windows(u)
         if addon_bar_state(u)[0]:                  # M7-a：无包零占位（与 5h 同策略）
             h += ROW_ADDON
@@ -1304,9 +1406,19 @@ class NoteApp:
         self._rounded_rect(0, 0, w, h, r, PAPER_EDGE)
         self._rounded_rect(lw, lw, w - lw, h - lw, max(2.0, r - lw), PAPER)
 
-        # ---- M12④ ↻ 图标先于纸纹创建（under-texture，见 _rot_images 注释）：
-        #      图底 PAPER 与纸面同色，纤维点/缝线照常从其上穿过——无接缝、不透桌面。
-        #      几何记账（_refresh_geo/rotbg/热区）与 M7-b 起完全同值。 ----
+        # ---- 纸纤维斜纹（点状颗粒） ----
+        step, skew = P(11), P(3)
+        i = -h
+        while i < w:
+            c.create_line(i, 0, i + skew, h, fill=PAPER_TX, width=1, dash=(1, 6))
+            i += step
+
+        # ---- M24A ↻ 图标族（rotbg+图）**后于纸纹创建**：恒压在纸纹之上、文字之下。
+        #      M12④ 的 under-texture 让虚线栅格穿过图标，在「初始渲染↔旋转/hover」
+        #      之间产生层序漂移（用户实测：静置被压下面、转一圈回到上面）→ 定案
+        #      恒序：icon items 一律在纹理后建，并经 _rot_raise 单一收口（与
+        #      _repaint_rot 同路）。图底 PAPER 与纸面同色、点阵间距 11px 极稀疏，
+        #      bbox 内最多遮蔽个位数 1px 点，无接缝观感。几何记账不变。 ----
         stat = self._head_status()
         icx = w - m - self.f_tiny.measure(stat) - self._p(6) - self._p(7.5)
         icy = P(34)
@@ -1317,13 +1429,7 @@ class NoteApp:
         if self._hover_ic:
             c.itemconfigure("rotbg", state="normal")
         self._rot_icon(icx, icy)
-
-        # ---- 纸纤维斜纹（点状颗粒） ----
-        step, skew = P(11), P(3)
-        i = -h
-        while i < w:
-            c.create_line(i, 0, i + skew, h, fill=PAPER_TX, width=1, dash=(1, 6))
-            i += step
+        self._rot_raise()
 
         # ---- 顶沿高光 / 底沿暗线 ----
         c.create_line(r, P(1.6), w - r, P(1.6), fill=PAPER_HI, width=lw)
@@ -1345,7 +1451,7 @@ class NoteApp:
         c.create_line(m, P(45), w - m, P(45), fill=PAPER_EDGE, dash=(2, 3))
         c.create_text(w - m, P(34), anchor="e", font=self.f_tiny,
                       fill=ORANGE if self.fetching else SOFT, text=stat)
-        # ↻ 图像与 rotbg 已在纸纹层之前创建（M12④）；此处仅挂热区（坐标同旧）
+        # ↻ 图像与 rotbg 已在纸纹层之后创建（M24A 恒序）；此处仅挂热区（坐标同旧）
         self.clicks.append((icx - ird, icy - ird, icx + ird, icy + ird, self.refresh))
         self.hits.append((icx - ird, icy - ird, icx + ird, icy + ird,
                           {"tip": "立即刷新（绕过缓存）"}))
@@ -1410,8 +1516,17 @@ class NoteApp:
         self.canvas.create_image(cx, cy, image=self._rot_images()[self._rot],
                                  tags=("rot", "rotimg"))
 
+    def _rot_raise(self) -> None:
+        """M24A 层序收口（唯一出口）：图标族恒序——纸纹之上、rotbg 在图之下。
+        初始渲染与每个旋转帧/hover 重绘同路调用，任何时刻所见层序一致。"""
+        try:
+            self.canvas.tag_raise("rotbg")
+            self.canvas.tag_raise("rot")
+        except tk.TclError:
+            pass
+
     def _repaint_rot(self) -> None:
-        """旋转帧：只换 image 引用（不删体重绘，层序恒定、成本≈0）。"""
+        """旋转帧：只换 image 引用（不删体重绘），并走 _rot_raise 同一层序收口。"""
         geo = self._refresh_geo
         if geo is None or self._quitting or not self.root.winfo_exists():
             return
@@ -1420,6 +1535,7 @@ class NoteApp:
                                       image=self._rot_images()[self._rot])
         except tk.TclError:
             pass
+        self._rot_raise()
 
     def _start_spin(self) -> None:
         if self._spin_job is not None or self._quitting:
@@ -1527,6 +1643,11 @@ class NoteApp:
         big, left = breakdown_display(u)      # 大数字与 C 行分项同源，保证 Σ 自洽
         # M11d① 分流计算上提：codex 固定槽（5h 主条）+ 大数字口径覆写
         cx_main, cx_sec = codex_bars(u)
+        # M24B Go 多主条：大数字=剩余占比·最紧窗口径（各窗 pct 最大者的余量）
+        gb = go_bars(u)
+        if gb:
+            gp = go_tightest_pct(gb)
+            big = f"{(1 - gp) * 100:.0f}%" if gp is not None else "—"
         if cx_main is not None:
             # M11d 口径定案：大数字随主条窗剩余占比（所见即所得，与主条同窗同数）；
             # 周窗紧迫度不丢——副细条自着色黄/红 + 自带倒计时（各窗独立判阈值不变）。
@@ -1545,8 +1666,11 @@ class NoteApp:
         if cx_main is not None:
             return self._draw_codex_bars(top, info, u, cx_main, cx_sec,
                                          m, right, stale)
+        # M24B Go 多主条支路：与 codex M14 同语法（有几窗画几条，5h→日→周→月上到下）
+        if gb:
+            return self._draw_win_bars(top, info, u, gb, m, right, stale)
 
-        # B 行：主窗口标签 + 倒计时；进度条（Go 的 rolling 经 WIN_LABELS 显示为 "~5h"）
+        # B 行：主窗口标签 + 倒计时；进度条（Go 的 rolling 经 WIN_LABELS 显示为 "5h"）
         main_w = u.windows[0] if u.windows else None
         label = WIN_LABELS.get(main_w.label, main_w.label) if main_w else "主窗口"
         pct_used = u.pct_used
@@ -1602,8 +1726,24 @@ class NoteApp:
 
         # C 行：数值拆分（更新时间只在标题行出现，此处不再重复）
         if left:
-            c.create_text(m, P(y + 82 + (ROW_ADDON if show_ad else 0)),
-                          anchor="w", font=self.f_tiny, fill=c_soft, text=left)
+            yy = P(y + 82 + (ROW_ADDON if show_ad else 0))
+            l_txt, t_txt, t_col = left, None, c_soft  # M23：套餐到期后缀（plan_end=None 零占位）
+            pe = plan_end_display(u)
+            if pe is not None:
+                t_txt, t_col = pe
+                if stale:
+                    t_col = c_soft                    # 旧值灰显时到期文字随灰（紧急档也不例外）
+                l_txt, keep = plan_end_split(left, t_txt, self.f_tiny.measure,
+                                             right - m - P(4))
+                if keep is None:
+                    t_txt = None                      # 截了主文仍放不下 → 后缀不显（同律降级）
+                else:
+                    t_txt = keep
+            c.create_text(m, yy, anchor="w", font=self.f_tiny, fill=c_soft,
+                          text=l_txt)
+            if t_txt:
+                c.create_text(m + self.f_tiny.measure(l_txt), yy, anchor="w",
+                              font=self.f_tiny, fill=t_col, text=t_txt)
 
         bottom = top + ROW_FULL + (ROW_ADDON if show_ad else 0)
         # D 行（可选）：主行之外的窗口逐条副显（百炼 5h / Go 周·月）；不返回即完全不占位
@@ -1632,23 +1772,35 @@ class NoteApp:
         组间 12px（条-条 19px）。阈值色按**各自窗** pct 独立判（_bar_color），
         填充=已用向，图文自洽无需锚字（M11c③ 纪律在双主条下自然成立）。
         整组（双窗）底缘 y+97 < ROW_FULL=100：第二条借用旧细条+C 行空档，行高不增。
-        """
+        M24B 起几何循环收编进 _draw_win_bars（Go 多主条共用同族语法），本函数只剩
+        固定槽取数转调。"""
+        return self._draw_win_bars(top, info, u,
+                                   [main] + ([sec] if sec is not None else []),
+                                   m, right, stale)
+
+    def _draw_win_bars(self, top: float, info: dict, u: Usage,
+                       bars: list[Window], m: float, right: float,
+                       stale: bool) -> float:
+        """M14/M24B 多主条行：N 个等尺寸「文字行+9px 条」信息块自上而下排布。
+
+        块行距 GO_BAR_PITCH=28（文字→条 7 + 条 9 + 组间 12）；两窗底缘 97 收进
+        ROW_FULL=100（行高零增），第 3 窗起每多一窗行高 +28（与 _row_h 同账）。
+        codex（固定槽 5h/周，≤2 块）与 Go（5h/日/周/月全量出条）共用本路径。"""
         P = self._p
-        y = top
         c_name = INK if not stale else SOFT
         c_soft = SOFT_TXT if not stale else FAINT
-        self._codex_bar_block(m, right, y + CODEX_TEXT_Y, main, stale, c_name, c_soft)
-        if sec is not None:
-            self._codex_bar_block(m, right, y + CODEX_TEXT_Y + CODEX_TXT_BAR + 9
-                                  + CODEX_GAP, sec, stale, c_name, c_soft)
-        bottom = y + ROW_FULL
-        self.hits.append((m - self._p(6), P(y), right + self._p(6), P(bottom),
+        for k, w in enumerate(bars):
+            self._codex_bar_block(m, right, top + CODEX_TEXT_Y + k * GO_BAR_PITCH,
+                                  w, stale, c_name, c_soft)
+        bottom = top + ROW_FULL + GO_BAR_PITCH * max(0, len(bars) - 2)
+        self.hits.append((m - P(6), P(top), right + P(6), P(bottom),
                           {"u": u, "err": info["err"], "stale": stale}))
         return bottom
 
     def _codex_bar_block(self, m: float, right: float, ty: float, win: Window,
                          stale: bool, c_name: str, c_soft: str) -> None:
-        """M14 单信息块：文字行中心在 ty，条占 ty+7 .. ty+7+9（几何语法=百炼 B 行）。"""
+        """M14 单信息块（M24B Go 共用）：文字行中心在 ty，条占 ty+7 .. ty+7+9
+        （几何语法=百炼 B 行）。label 短名一律无「窗」字（codex_win_caption M24B）。"""
         c, P = self.canvas, self._p
         pct = win.pct_used
         txt = (f"{codex_win_caption(win.label)} · 已用 {pct:.1%}" if pct is not None

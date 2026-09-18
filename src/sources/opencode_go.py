@@ -5,11 +5,16 @@
 - key 来源（spec §2.3）：DPAPI secret opencode_go_key 优先；否则（config
   opencode_go.auto_detect=true）经 auth.detect_go_key() 读 opencode auth.json 的
   "opencode-go" 条目——**绝不回退用 Zen（"opencode"）key**（打此端点必 403）。
-- 字段（spec §2.2 API 变体，双形态兼容）：usage.rolling（必有）/ weekly / monthly（有则进
-  windows）；percent 0..100 → 0..1（>1 才 /100，与百炼同款），dashboard 变体 usagePercent
-  兼容兜底；status=="rate-limited" → 100%；resetsAt ISO 带小数秒 / epoch 数字（>1e12 毫秒、
-  >1e9 秒）双兼容，dashboard 变体 resetInSec（倒计时秒）亦兼容。
-- 语义：unit="percent"；服务端不下发绝对额 → total/remaining=None；主行=rolling（UI 文案"~5h"）。
+- 字段（spec §2.2 API 变体，双形态兼容）：usage.rolling（必有）/ daily / weekly / monthly
+  （有则进 windows）；percent 0..100 → 0..1（>1 才 /100，与百炼同款），dashboard 变体
+  usagePercent 兼容兜底；status=="rate-limited" → 100%；resetsAt ISO 带小数秒 / epoch 数字
+  （>1e12 毫秒、>1e9 秒）双兼容，dashboard 变体 resetInSec（倒计时秒）亦兼容。
+- M24B 窗口标签映射：显示 label 在 source 层定稿——字段名 rolling→"5h" / daily→"日" /
+  weekly→"周" / monthly→"月"；若窗对象自带秒数字段（windowSeconds 等候选键），按
+  {18000→"5h", 86400→"日", 604800→"周"} 映射（未知秒数 → "other:<sec>"，宁缺勿错，
+  spec 文档暂无"日"窗字段佐证，用户实测有日窗故双路防御）。windows 固定序输出：
+  5h→日→周→月（→other/未知尾置，稳定排序）。主行仍=rolling。
+- 语义：unit="percent"；服务端不下发绝对额 → total/remaining=None；主行=rolling（显示"5h"）。
 - 错误映射（spec §2.4，403 必须解析 body）：401→KEY_INVALID；
   403 且 body error.type=="EntitlementError"→NO_SUBSCRIPTION（其他 403→HTTP_403"不可用"）；
   429→RATE_LIMITED；≠200 读 body message/error/detail 或 HTML <title> 前 80 字符。
@@ -35,6 +40,14 @@ CACHE_TTL_SECONDS = 60.0
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 UA = "token-widget/1.0"
 TIMEOUT = 20
+
+# M24B：窗口 → 显示 label 的两路映射（字段名兜底 + 秒数优先）。秒数字段与"日"窗在
+# wire spec（§2.2）均无记载 → 纯防御性：上游哪天带上 daily 字段或 windowSeconds，
+# 这里即刻正确显名；都没有时行为与旧版逐字相同（rolling/weekly/monthly 字段兜底）。
+FIELD_LABELS = {"rolling": "5h", "daily": "日", "weekly": "周", "monthly": "月"}
+SEC_LABELS = {18000: "5h", 86400: "日", 604800: "周"}
+SEC_KEYS = ("windowSeconds", "window_seconds", "limit_window_seconds", "duration")
+LABEL_ORDER = ("5h", "日", "周", "月")            # 固定展示序；未知/other 尾置
 
 _OPENER = urllib.request.build_opener(type(
     "NoRedirect", (urllib.request.HTTPRedirectHandler,),
@@ -116,6 +129,25 @@ def _parse_window(w: dict) -> tuple[float | None, datetime | None]:
         if isinstance(s, (int, float)) and not isinstance(s, bool):
             reset = datetime.now(timezone.utc) + timedelta(seconds=float(s))
     return pct, reset
+
+
+def _win_label(field: str, w: dict) -> str:
+    """M24B 单窗显示 label：秒数字段优先（86400→"日" 等），缺则按字段名兜底。
+
+    未知秒数 → "other:<sec>"（与通用源同语法，UI 尾置不丢数据）。"""
+    for k in SEC_KEYS:
+        v = w.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            s = int(v)
+            return SEC_LABELS.get(s, f"other:{s}")
+    return FIELD_LABELS.get(field, field)
+
+
+def _sort_windows(windows: list[Window]) -> list[Window]:
+    """固定序 5h→日→周→月→（other/未知尾置）；sorted 稳定，同级保持原相对序。"""
+    def key(w: Window) -> int:
+        return LABEL_ORDER.index(w.label) if w.label in LABEL_ORDER else len(LABEL_ORDER)
+    return sorted(windows, key=key)
 
 
 def _body_err(raw: bytes) -> tuple[str | None, str]:
@@ -218,14 +250,15 @@ class OpenCodeGoSource(ProviderSource):
         if not isinstance(rolling, dict):
             return _fail("PARSE_EMPTY", "响应缺少 usage.rolling（校验：rolling 必须存在）")
 
-        windows: list[Window] = []
         pct, reset = _parse_window(rolling)
-        windows.append(Window(label="rolling", pct_used=pct, resets_at=reset))
-        for label in ("weekly", "monthly"):     # 缺省则不进 windows、不渲染（spec §2.2）
-            w = usage.get(label) if isinstance(usage, dict) else None
+        windows: list[Window] = [
+            Window(label=_win_label("rolling", rolling), pct_used=pct, resets_at=reset)]
+        for field in ("daily", "weekly", "monthly"):   # 缺省则不进 windows、不渲染（spec §2.2）
+            w = usage.get(field) if isinstance(usage, dict) else None
             if isinstance(w, dict):
                 p, r = _parse_window(w)
-                windows.append(Window(label=label, pct_used=p, resets_at=r))
+                windows.append(Window(label=_win_label(field, w), pct_used=p, resets_at=r))
+        windows = _sort_windows(windows)     # M24B：5h→日→周→月（other 尾置）
 
         return Usage(provider=self.name, ok=True, unit="percent",
                      pct_used=pct, resets_at=reset, windows=windows)

@@ -21,7 +21,8 @@ from src import auth, settings_panel                          # noqa: E402
 from src.scheduler import Scheduler                           # noqa: E402
 from src.sources.base import Usage, Window                     # noqa: E402
 from src.state import DEFAULTS                                # noqa: E402
-from src.ui import (ROW_ADDON, NoteApp, addon_bar_state, breakdown_display,   # noqa: E402
+from src.ui import (ROW_ADDON, NoteApp, ORANGE, RED, SOFT_TXT, addon_bar_state,   # noqa: E402
+                    breakdown_display, plan_end_display, plan_end_split,
                     usd_used_mode)
 import main as main_mod                                        # noqa: E402
 
@@ -362,6 +363,75 @@ def run(tmp: Path) -> int:
 
         case("strip_fill_direction_and_hi", strip_fill_direction)
 
+        # ============ 12b) M24C 高光线绝对像素阈：双态矩阵（24 逻辑px 一把尺） ============
+        def bar_hi_absolute_px_matrix():
+            """M7b⑤ 旧「<15% 轨宽」→ M24C 绝对阈：填充宽 ≥24 逻辑px 才画内高光线。
+
+            矩阵跨旧阈两侧：8%/10% 都 <15% 轨宽，但绝对宽 20.8px/26px 分居 24px
+            阈两侧——新规则下无/有；≥15% 恒有；<0 无。双主条并排按同尺判定自然一致。"""
+            c = app.canvas
+            S = app.S
+            tw = 260.0 * S
+            def hi_n(pct):
+                c.delete("all")
+                app.hits.clear()
+                app.clicks.clear()
+                app._bar(20 * S, 40 * S, tw, 9 * S, pct, "#3bc371")
+                return len([i for i in c.find_all()
+                            if c.type(i) == "line"
+                            and str(c.itemcget(i, "fill")).lower() == "#fffbEB".lower()])
+            try:
+                assert hi_n(23.5 / 260.0) == 0, "绝对宽 23.5px < 24px：应无高光"
+                assert hi_n(0.10) == 1, "26px（8%→20.8px 无、10% 有——均 <15% 旧阈）"
+                assert hi_n(25.0 / 260.0) == 1, "25px ≥ 24px：应画"
+                assert hi_n(0.41) == 1, "大窗恒有"
+                assert hi_n(0.0) == 0, "零填充不画"
+            finally:
+                feed(app, u_no_addon())          # 还原真实画面（case13 同法）
+
+        case("bar_hi_absolute_px_matrix", bar_hi_absolute_px_matrix)
+
+        # ============ 12c) M24A ↻ 图标族层序恒定：纸纹之上（静置/旋转帧/hover） ============
+        def rot_layer_order_stable():
+            """缺陷根因锁：under-texture 时代图标在虚线栅格之下，且初始渲染与旋转/
+            hover 重绘路径不一致产生层序漂移。M24A 定案：rotbg/rot 两 item 恒在
+            全部纹理线（dash=(1,6)）之后（之上）；静置、旋转帧、hover 三态同序。"""
+            feed(app, u_no_addon())
+            c = app.canvas
+
+            def check(where: str) -> None:
+                alls = c.find_all()
+                pos = {it: k for k, it in enumerate(alls)}
+                tex = [pos[i] for i in alls
+                       if c.type(i) == "line"
+                       and str(c.itemcget(i, "fill")).lower() == "#eedfb8"
+                       and str(c.itemcget(i, "dash")).strip("()").replace(" ", "")]
+                assert tex, where + "：未找到纸纹线"
+                for tag in ("rotbg", "rot"):
+                    its = [pos[i] for i in c.find_withtag(tag)]
+                    assert its, f"{where}：{tag} item 缺失"
+                    assert min(its) > max(tex), \
+                        f"{where}：{tag} 层序不在纸纹之上 {min(its)}<={max(tex)}"
+                # 恒序内检：rotbg 在图之下（两 tag 各一枚即可全序比较）
+                assert pos[c.find_withtag("rotbg")[0]] < pos[c.find_withtag("rot")[0]], \
+                    where + "：rotbg 应在图标 image 之下"
+
+            check("静置态")
+            app._rot = 300
+            app._repaint_rot()                   # 旋转帧同路（_rot_raise 收口）
+            check("旋转帧")
+            ic = app._refresh_geo
+            ev = types.SimpleNamespace(x=int(ic[0]), y=int(ic[1]), x_root=0, y_root=0)
+            app._on_move(ev)                     # hover 进（toggle rotbg，同路不删重绘）
+            assert str(c.itemcget(c.find_withtag("rotbg")[0], "state")) == "normal", \
+                "hover 应点亮 rotbg"
+            check("hover 态")
+            app._on_move(types.SimpleNamespace(x=5, y=int(float(c.cget("height"))) - 5,
+                                               x_root=0, y_root=0))   # 移出复位
+            check("hover 移出复位")
+
+        case("rot_layer_order_stable", rot_layer_order_stable)
+
         # ============ 13) M7b④ 胶囊描边=单条闭合折线（端点帽根治）+ 实拍右帽轮廓 ============
         def pill_outline_is_single_polygon():
             c = app.canvas
@@ -466,6 +536,91 @@ def run(tmp: Path) -> int:
             assert GUIDE not in tsc, "有余额态不得出现指引文案"
 
         case("usd_three_states_m9b", usd_three_states)
+
+        # ============ M23) 套餐到期：纯函数矩阵（分档/跨年/零占位/宽度守卫） ============
+        def plan_end_unit():
+            anchor = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+
+            def pe(dt):
+                return Usage(provider="bailian", ok=True, unit="credits",
+                             remaining=100.0, total=100.0, pct_used=0.5, plan_end=dt)
+            assert plan_end_display(pe(None), anchor) is None        # None→零占位
+            t30, c30 = plan_end_display(pe(datetime(2026, 10, 18, 12, 0,
+                                                   tzinfo=timezone.utc)), anchor)
+            assert t30 == " · 套餐 10-18 到期" and c30 == SOFT_TXT, (t30, c30)
+            t7, c7 = plan_end_display(pe(datetime(2026, 9, 25, 12, 0,
+                                                  tzinfo=timezone.utc)), anchor)
+            assert t7 == " · 套餐 09-25 到期" and c7 == ORANGE, (t7, c7)   # 整 7 天=橙档
+            t4, c4 = plan_end_display(pe(datetime(2026, 9, 22, 12, 0,
+                                                  tzinfo=timezone.utc)), anchor)
+            assert c4 == ORANGE                                       # 4 天仍橙
+            t3, c3 = plan_end_display(pe(datetime(2026, 9, 21, 12, 0,
+                                                  tzinfo=timezone.utc)), anchor)
+            assert c3 == RED                                          # 3 天=红档
+            te, ce = plan_end_display(pe(datetime(2026, 9, 10, 12, 0,
+                                                  tzinfo=timezone.utc)), anchor)
+            assert ce == RED and te == " · 套餐 09-10 到期"            # 已过期按最紧迫
+            tx, cx = plan_end_display(pe(datetime(2027, 1, 5, 12, 0,
+                                                  tzinfo=timezone.utc)), anchor)
+            assert tx == " · 套餐 2027-01-05 到期", tx                 # 跨年显全日期
+            # Go/Codex：plan_end 恒 None → 永不显示
+            assert plan_end_display(Usage(provider="opencode_go", ok=True,
+                                          unit="percent", pct_used=0.2)) is None
+            # 宽度守卫三分支（measure=字符数×8px 模拟 f_tiny）
+            m8 = lambda s: len(s) * 8
+            assert plan_end_split("ABCD", "TAIL", m8, 10 ** 6) == ("ABCD", "TAIL")
+            assert plan_end_split("abcdefghij" * 2, "TAIL", m8, 100) == ("abcdefg…", "TAIL")
+            assert plan_end_split("abcdefghij" * 2, "TAIL" * 4, m8, 40) \
+                == ("abcdefghijabcdefghij", None)                     # 兜不住→后缀不显（降级）
+            assert plan_end_split("X", "", m8, 5) == ("X", None)       # 无后缀=原样
+
+        case("plan_end_unit_m23", plan_end_unit)
+
+        # ============ M23) 渲染接线：C 行后缀+色档、stale 随灰、tooltip 全式 ============
+        def plan_end_render():
+            c = app.canvas
+            def tail_item():
+                for i in c.find_all():
+                    if c.type(i) == "text" and "套餐" in str(c.itemcget(i, "text")):
+                        return i
+                return None
+            # ① 正常近端（剩 2 天→红档）：主文完整 + 独立后缀 item 填 RED
+            u = u_with_addon()
+            u.plan_end = datetime.now(timezone.utc) + timedelta(days=2, hours=6)
+            feed(app, u)
+            it = tail_item()
+            assert it is not None, texts(app)
+            assert str(c.itemcget(it, "fill")).lower() == RED.lower(), c.itemcget(it, "fill")
+            assert any(t.startswith("剩余 ") for t in texts(app)), "主文完整（宽度够不截断）"
+            tip = app._tip_text({"u": u, "err": None, "stale": False})
+            assert "套餐到期：" in tip and "剩 " in tip, tip          # 完整日期+天数行
+            # ② 远期：后缀在、色=SOFT_TXT（与 C 行同档）
+            u2 = u_with_addon()
+            u2.plan_end = datetime.now(timezone.utc) + timedelta(days=40)
+            feed(app, u2)
+            it2 = tail_item()
+            assert it2 is not None and str(c.itemcget(it2, "fill")).lower() == SOFT_TXT.lower()
+            # ③ plan_end=None：任何「套餐…到期」文本零出现（且主文无残留分隔符尾巴）
+            u3 = u_with_addon()
+            feed(app, u3)
+            assert tail_item() is None, texts(app)
+            assert not any("到期" in t and "套餐" in t for t in texts(app))
+            # ④ stale：last_good 带 plan_end 紧急档 → 日期照常显示但随行降灰(FAINT)
+            u4 = u_with_addon()
+            u4.plan_end = datetime.now(timezone.utc) + timedelta(days=1)
+            feed(app, u4)                                             # 先存 last_good
+            feed(app, Usage(provider="bailian", ok=False, error_code="NETWORK",
+                            error_msg="timed out"))
+            it4 = tail_item()
+            assert it4 is not None, texts(app)                        # stale 仍带日期
+            assert str(c.itemcget(it4, "fill")).lower() == "#b3a582", c.itemcget(it4, "fill")
+            assert any("旧数据" in t for t in texts(app)), "确系 stale 灰档行"
+            # ⑤ 零占位不扰高：plan_end 有/无两轮 bottom 一致
+            feed(app, u_with_addon())
+            h0 = [i for i in c.find_all() if c.type(i) == "text"]
+            feed(app, u_with_addon())
+
+        case("plan_end_render_m23", plan_end_render)
 
     finally:
         try:
