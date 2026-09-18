@@ -21,6 +21,12 @@ M19 增补：u21 改造为发现新版自动弹 UpdateDialog（标题/vX→vY/�
 download_and_stage/apply 桩、512KB 节流 %、通道审计、失败重试、NEED_ELEVATION 提权档、
 关窗后残余事件安全）；u31 纯函数（published/size/notes≤6 行截断）；定时路径 u22 加
 「绝不自动弹窗」断言。
+M28 增补（去 cmd 化）：u14 改造为 no_cmd_artifacts（render/CMD_NAME 退役 + 源码无
+COMSPEC/os.spawnv 残留）；u15 重写 marker→Popen 新 exe 本体（DETACHED|NEWPG、参数、
+marker JSON、失败清 marker）；**u16_swap_seq** run_pending_swap 九态（改名自身/
+零副作用/坏 marker/过期陈旧/self 救援/FAILED 回退/.old 清理/重复消费/重试节奏）；
+u19 重写 runas 直提权（参数含 marker 路径透传、1223 取消码、双不可写指路）；
+u23 FAILED 样本换 swap_failed 文案。
 """
 from __future__ import annotations
 
@@ -336,25 +342,24 @@ def u13_download_no_cl_and_crash() -> str:
 
 # ------------------------------------------------------- apply/cmd ----
 
-def u14_cmd_text() -> str:
-    s = up.render_restart_cmd(r"C:\w\local\update\TokenWidget.new.exe",
-                              r"C:\w\TokenWidget.exe",
-                              r"C:\w\local\update\restart_update.cmd")
-    assert 'move /Y "C:\\w\\TokenWidget.exe" "C:\\w\\TokenWidget.exe.old"' in s
-    assert 'move /Y "C:\\w\\local\\update\\TokenWidget.new.exe" "C:\\w\\TokenWidget.exe"' in s
-    assert 'start "" "C:\\w\\TokenWidget.exe"' in s                  # 空标题参数引号语言
-    assert 'del /Q "%~f0" 2>nul' in s, "cmd 自删"
-    assert "ping -n 4" in s and "if %TRIES% LSS 10" in s, "延时等待+改名重试"
-    low = s.lower()
-    for taboo in (".dpapi", "auth.json", "config.json", "state.json", "cookie"):
-        assert taboo not in low, f"cmd 不得触碰 local 数据：{taboo}"
-    assert ".old" in low and low.count('del /q') == 2, "仅删 .old 与 cmd 自身"
-    # M16：失败兜底落档（两步各有 echo + rc，路径指向 FAILED.txt）
-    assert 'rename_old_failed rc=%errorlevel% tries=%TRIES%> "c:\\w\\local\\update\\failed.txt"'.lower() in low
-    assert "move_new_failed rc=%errorlevel%" in low
-    s2 = up.render_restart_cmd(r"n.exe", r"o.exe", r"c2\cmd.cmd", failed_path=r"x\f.txt")
-    assert 'x\\f.txt' in s2, "failed_path 显式覆盖生效"
-    return "cmd 文本：引号/重试/自删/凭据零触碰/FAILED 落档"
+def u14_no_cmd_artifacts() -> str:
+    """M28（u14 改造非删案例）：cmd 链整体退役，任何 artifacts 不得回流。
+
+    - 模块属性 render_restart_cmd / CMD_NAME 不存在；
+    - apply 正常执行后 update 目录不出现任何 *.cmd；
+    - 源码（updater/settings_panel/main）非注释行不含 COMSPEC/os.spawnv/".cmd" 拼接
+      （根因说明注释保留 restart_update.cmd 字样是文档，不是行为）。"""
+    assert not hasattr(up, "render_restart_cmd"), "render 函数不得回流"
+    assert not hasattr(up, "CMD_NAME"), "CMD_NAME 属性不得回流"
+    assert up.MARKER_NAME == "pending_swap.json"
+    assert up.SWAP_DETACH_FLAGS == (0x00000008 | 0x00000200)
+    import io as _io
+    for f in ("src/updater.py", "src/settings_panel.py", "main.py"):
+        for ln in _io.open(ROOT / f, encoding="utf-8").read().splitlines():
+            code = ln.split("#", 1)[0]
+            assert "COMSPEC" not in code and "os.spawnv" not in code \
+                and '".cmd"' not in code, f"{f}: {ln.strip()[:60]}"
+    return "render/CMD_NAME 退役 + update 目录零 cmd + 源码无 shell 拼接残留"
 
 
 def u15_apply_flow() -> str:
@@ -362,37 +367,216 @@ def u15_apply_flow() -> str:
     d.mkdir(parents=True, exist_ok=True)
     new = d / up.NEW_EXE_NAME
     new.write_bytes(b"MZ fake exe")
-    W = lambda p: True                                # M16：正常路径=预检通过注入
-    spawned: list = []
+    W = lambda p: True                                # 预检通过注入
+    cap: dict = {}
     exited: list = []
+
+    def fake_popen(argv, creationflags=None, **kw):
+        cap["argv"] = list(argv)
+        cap["flags"] = creationflags
+        return object()
+
     err = up.apply_update_and_restart(
-        new, current_exe=r"C:\fake\TokenWidget.exe", probe=W,
-        spawn=lambda mode, exe, args: spawned.append((mode, exe, args)),
-        exit_fn=lambda code: exited.append(code))
+        new, current_exe=r"C:\fake\TokenWidget.exe", popen=fake_popen,
+        exit_fn=lambda code: exited.append(code), probe=W)
     assert err == "", err
-    assert spawned and spawned[0][0] == os.P_DETACH
-    assert spawned[0][2][-1] == str(d / up.CMD_NAME), "cmd 路径作为参数"
-    text = (d / up.CMD_NAME).read_text(encoding="gbk")
-    assert "TokenWidget.new.exe" in text and ".dpapi" not in text
-    assert "failed.txt" in text.lower(), "M16 失败落档行入 cmd"
-    assert exited == [0], "成功后本进程退出"
-    # 缺包 → 原因且不 spawn
-    spawned.clear(); exited.clear()
-    err2 = up.apply_update_and_restart(d / "nope.exe", probe=W,
-                                       spawn=lambda *a: spawned.append(a),
+    argv = cap["argv"]
+    assert argv[0] == str(new), "Popen 目标=staged 新 exe 本体（非任何 shell）"
+    assert up.SWAP_FLAG in argv and up.SWAP_MARKER_FLAG in argv
+    mk = argv[argv.index(up.SWAP_MARKER_FLAG) + 1]
+    assert mk == str(d / up.MARKER_NAME)
+    assert cap["flags"] == up.SWAP_DETACH_FLAGS, hex(cap["flags"] or 0)
+    assert "cmd" not in " ".join(argv).lower()
+    m = json.loads((d / up.MARKER_NAME).read_text(encoding="utf-8"))
+    assert m["old"] == r"C:\fake\TokenWidget.exe" and m["new"] == str(new) and m["ts"] > 0
+    assert exited == [0], "接管成功后本进程退出（exit_fn 注入纪律保持）"
+    assert not list(d.glob("*.cmd")), "cmd artifacts 不得回流"
+    (d / up.MARKER_NAME).unlink()
+    # 缺包 → 原因且零 popen 零 marker 零退出
+    cap.clear(); exited.clear()
+    err2 = up.apply_update_and_restart(d / "nope.exe",
+                                       current_exe=r"C:\fake\TokenWidget.exe",
+                                       popen=fake_popen, probe=W,
                                        exit_fn=lambda c: exited.append(c))
-    assert "尚未下载" in err2 and not spawned and not exited
+    assert "尚未下载" in err2 and not cap and not exited and not (d / up.MARKER_NAME).exists()
     # dev 模式（current=new 同名）拒绝
-    err3 = up.apply_update_and_restart(new, current_exe=new, probe=W,
-                                       spawn=lambda *a: None, exit_fn=lambda c: None)
+    err3 = up.apply_update_and_restart(new, current_exe=new, popen=fake_popen,
+                                       exit_fn=lambda c: None)
     assert "dev 模式" in err3
-    # spawn 失败 → 清理 cmd、不 exit
-    def boom(*a):
+    # Popen 失败 → 清 marker、给原因、不退出
+    cap.clear(); exited.clear()
+
+    def boom(argv, creationflags=None, **kw):
         raise OSError("spawn denied")
+
     err4 = up.apply_update_and_restart(new, current_exe=r"C:\fake\TokenWidget.exe",
-                                       probe=W, spawn=boom, exit_fn=lambda c: exited.append(c))
-    assert "无法启动更新脚本" in err4 and not (d / up.CMD_NAME).exists() and not exited
-    return "写cmd→DETACHED spawn→exit；缺包/dev同名/spawn败 三拒绝路径"
+                                       popen=boom, probe=W,
+                                       exit_fn=lambda c: exited.append(c))
+    assert "无法启动新实例" in err4 and not (d / up.MARKER_NAME).exists() and not exited
+    return "写marker→Popen新exe本体(DETACHED|NEWPG)→exit；缺包/dev同名/popen败 三拒绝+清marker"
+
+
+def u16_swap_seq() -> str:
+    """M28：run_pending_swap 八态矩阵——改名自身（Windows 运行中改映像名合法，
+    tmp 文件系统层等价验证 + frozen E2E 实机核验见收口报告）/无 marker 零副作用/
+    坏 marker/过期陈旧/**过期但 self=请求主体仍执行**/失败 FAILED 回退/陈旧 .old
+    清理/重复消费防御。"""
+    base = tmp_root / "swap"
+    base.mkdir(exist_ok=True)
+    old = base / "TokenWidget.exe"
+    newf = base / "TokenWidget.new.exe"
+    mp = base / "pending_swap.json"
+
+    def reset():
+        for f in list(base.glob("TokenWidget*")) + [mp, base / up.FAILED_NAME]:
+            if f.exists():
+                f.unlink()
+        old.write_bytes(b"OLD")
+        newf.write_bytes(b"NEW")
+
+    # ① 正常换装（cur=self=.new 改名自身路径）
+    reset()
+    up.write_marker(old, newf, base=base)
+    assert up.run_pending_swap(current_exe=newf, marker_override=mp,
+                               sleeper=lambda s: None) == "swapped"
+    assert old.read_bytes() == b"NEW" and not newf.exists()
+    assert (base / "TokenWidget.exe.old").read_bytes() == b"OLD"
+    assert not mp.exists() and not (base / up.FAILED_NAME).exists()
+    # ② 无 marker：零副作用（老用户正常启动不受扰——双向兼容硬要求）
+    reset()
+    assert up.run_pending_swap(current_exe=old, marker_override=mp) == ""
+    assert old.read_bytes() == b"OLD" and newf.exists()
+    # ③ 坏 marker：清掉返回 ""
+    reset()
+    mp.write_text("garbage{", encoding="utf-8")
+    assert up.run_pending_swap(current_exe=old, marker_override=mp) == ""
+    assert not mp.exists()
+    # ④ 过期 marker（非请求主体）→ 陈旧自清不执行
+    reset()
+    up.write_marker(old, newf, base=base, now=time.time() - 700)
+    assert up.run_pending_swap(current_exe=old, marker_override=mp) == ""
+    assert not mp.exists() and old.read_bytes() == b"OLD" and newf.exists()
+    # ⑤ 过期但 cur=self(.new) → 仍执行（自救援，断链例外）
+    reset()
+    up.write_marker(old, newf, base=base, now=time.time() - 700)
+    assert up.run_pending_swap(current_exe=newf, marker_override=mp,
+                               sleeper=lambda s: None) == "swapped"
+    assert old.read_bytes() == b"NEW"
+    # ⑥ 改名失败 → FAILED.txt + marker 消费 + staged 保留（不 brick，可下次自救援）
+    reset()
+    up.write_marker(old, newf, base=base)
+    orig_rr = up._rename_retry
+    try:
+        up._rename_retry = lambda *a, **k: (_ for _ in ()).throw(
+            PermissionError(13, "used by another process"))
+        assert up.run_pending_swap(current_exe=newf, marker_override=mp) == "failed"
+    finally:
+        up._rename_retry = orig_rr
+    fail_txt = (base / up.FAILED_NAME).read_text(encoding="gbk", errors="replace")
+    assert fail_txt.startswith("swap_failed"), fail_txt
+    assert not mp.exists(), "marker 必清（防每次启动重跑失败序列）"
+    assert newf.exists() and old.read_bytes() == b"OLD", "staged 保留原位继续运行"
+    # ⑦ 陈旧 .old 清理：2 个历史 .old（旧时间戳）→ 换装后只剩本轮最新 1 个
+    reset()
+    for nm in ("TokenWidgetA.exe.old", "TokenWidgetB.exe.old"):
+        f = base / nm
+        f.write_bytes(b"x")
+        os.utime(f, (1000, 1000))
+    up.write_marker(old, newf, base=base)
+    assert up.run_pending_swap(current_exe=newf, marker_override=mp,
+                               sleeper=lambda s: None) == "swapped"
+    olds = list(base.glob("*.old"))
+    assert len(olds) == 1 and olds[0].name == "TokenWidget.exe.old", [p.name for p in olds]
+    # ⑧ 重复消费防御：new 已被换走（正名在、.new 无）→ "swapped" 收尾、marker 清、无 FAILED
+    reset()
+    up.write_marker(old, newf, base=base)
+    newf.unlink()
+    assert up.run_pending_swap(current_exe=old, marker_override=mp) == "swapped"
+    assert old.read_bytes() == b"OLD" and not mp.exists()
+    # ⑧b 崩溃孤儿 .old 自修复：正名无 + .new 无 + .old 在且无进程持有 → 搬回正名
+    reset()
+    up.write_marker(old, newf, base=base)
+    newf.unlink()
+    old.unlink()
+    (base / "TokenWidget.exe.old").write_bytes(b"OLD")
+    orig_alive = up._image_holder_alive
+    try:
+        up._image_holder_alive = lambda p: False
+        assert up.run_pending_swap(current_exe=base / "who.exe", marker_override=mp) == ""
+    finally:
+        up._image_holder_alive = orig_alive
+    assert old.read_bytes() == b"OLD" and not (base / "TokenWidget.exe.old").exists()
+    assert not mp.exists()
+    # ⑨ 占用重试节奏（_rename_retry 本体）：3 次尝试 2 次间隔、终抛
+    calls: list = []
+    try:
+        up._rename_retry(base / "nope.exe", base / "x.old", tries=3,
+                         sleeper=lambda s: calls.append(s))
+        raise AssertionError("应抛")
+    except FileNotFoundError:
+        pass
+    assert len(calls) == 2, calls
+    return "改名自身换装/零副作用/坏marker/过期陈旧/self救援/FAILED回退/·old清理/重复消费/重试节奏"
+
+
+def u19_elevation() -> str:
+    """M28：提权路径改 ShellExecuteW runas 直拉新 exe（一次 UAC，替代 PS 包 cmd）。"""
+    d = config_mod.LOCAL_DIR / "update"
+    d.mkdir(parents=True, exist_ok=True)
+    new = d / up.NEW_EXE_NAME
+    new.write_bytes(b"MZ")
+    seen: dict = {}
+    exited: list = []
+    NO = lambda p: False
+    err = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                      probe=NO, popen=lambda *a, **k: seen.__setitem__("popen", 1),
+                                      exit_fn=lambda c: exited.append(c))
+    assert err.startswith(up.NEED_ELEVATION) and "移动位置" in err, err
+    assert "popen" not in seen and not exited, "预检失败未提权 → 零拉起零退出"
+    # runas 成功（rc=42>32）：exe=staged 新体；args=swap flag+marker 路径；退出
+    marker = d / up.MARKER_NAME
+    if marker.exists():
+        marker.unlink()
+
+    def ok_runas(exe, args):
+        seen["exe"], seen["args"] = exe, list(args)
+        return 42
+
+    err2 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                       elevated=True, probe=NO, runas=ok_runas,
+                                       exit_fn=lambda c: exited.append(c))
+    assert err2 == "" and seen["exe"] == new, err2
+    assert seen["args"][0] == up.SWAP_FLAG and seen["args"][1] == up.SWAP_MARKER_FLAG
+    assert seen["args"][2] == str(marker) and marker.exists(), "marker 路径随参数传给提权子体"
+    assert exited == [0]
+    marker.unlink()
+    # UAC 被拒（rc=1223）→ 指路文案 + marker 清 + 不退出
+    err3 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                       elevated=True, probe=NO,
+                                       runas=lambda e, a: 1223,
+                                       exit_fn=lambda c: exited.append(c))
+    assert "提权被取消" in err3 and "可写目录" in err3, err3
+    assert not marker.exists() and exited == [0]
+    # runas 抛 OSError → 原因 + marker 清
+    def raiser(e, a):
+        raise OSError("no shell")
+    err3b = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                        elevated=True, probe=NO, runas=raiser,
+                                        exit_fn=lambda c: exited.append(c))
+    assert "提权启动失败" in err3b and exited == [0]
+    # staging/TEMP 双不可写 → 指路移动（不触 runas；注入 _writable_dir）
+    orig_w = up._writable_dir
+    try:
+        up._writable_dir = lambda b: False
+        hit = {"n": 0}
+        err4 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
+                                           elevated=True, probe=NO,
+                                           runas=lambda e, a: hit.__setitem__("n", 1) or 42,
+                                           exit_fn=lambda c: None)
+        assert "可写目录" in err4 and hit["n"] == 0, err4
+    finally:
+        up._writable_dir = orig_w
+    return "NEED_ELEVATION 不退出；runas 直拉新体(marker 随参)；取消/异常→指路；双不可写→指路"
 
 
 def u16_next_trigger_matrix() -> str:
@@ -433,48 +617,6 @@ def u18_probe() -> str:
     ghost = tmp_root / "no_such_dir" / "TokenWidget.exe"
     assert up.probe_replace_permission(ghost) is False
     return "可写 True/不可写路径 False；.write_test.tmp 零残留"
-
-
-def u19_elevation() -> str:
-    d = config_mod.LOCAL_DIR / "update"
-    d.mkdir(parents=True, exist_ok=True)
-    new = d / up.NEW_EXE_NAME
-    new.write_bytes(b"MZ")
-    spawned: list = []
-    exited: list = []
-    NO = lambda p: False
-    err = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe", probe=NO,
-                                      spawn=lambda *a: spawned.append(a),
-                                      exit_fn=lambda c: exited.append(c))
-    assert err.startswith(up.NEED_ELEVATION) and "移动位置" in err, err
-    assert not spawned and not exited, "预检失败必须不退出、不 spawn"
-    # 提权重试：经 PowerShell Start-Process -Verb RunAs（一次 UAC）；cmd 落 TEMP
-    err2 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
-                                       elevated=True, probe=NO,
-                                       spawn=lambda mode, exe, args: spawned.append((exe, args)),
-                                       exit_fn=lambda c: exited.append(c))
-    assert err2 == "" and len(spawned) == 1
-    exe, args = spawned[0]
-    assert "powershell" in exe.lower(), exe
-    joined = " ".join(args)
-    assert "-Verb RunAs" in joined and "Start-Process" in joined and up.CMD_NAME in joined
-    staged_cmd = Path(str(args[-1]))
-    assert (staged_cmd.parent / up.FAILED_NAME).name == up.FAILED_NAME
-    assert exited == [0]
-    # staging 与 TEMP 双不可写 → 指路移动位置（不 spawn 不退出；Windows chmod 不可靠，
-    # 用 _writable_dir 注入模拟）
-    orig_w = up._writable_dir
-    try:
-        up._writable_dir = lambda b: False
-        spawned.clear(); exited.clear()
-        err5 = up.apply_update_and_restart(new, current_exe=r"C:\ro\TokenWidget.exe",
-                                           elevated=True, probe=NO,
-                                           spawn=lambda *a: spawned.append(a),
-                                           exit_fn=lambda c: exited.append(c))
-        assert "可写目录" in err5 and not spawned and not exited, err5
-    finally:
-        up._writable_dir = orig_w
-    return "NEED_ELEVATION 不退出；提权=PS -Verb RunAs；双不可写指路移动"
 
 
 # ------------------------------------------------------- 面板（Tk）----
@@ -640,7 +782,8 @@ def u23_panel_failed_note_and_force_open(app, root) -> str:
     clear_cfg(repo="fake-owner/fake-repo", enabled=False)
     d = config_mod.LOCAL_DIR / "update"
     d.mkdir(parents=True, exist_ok=True)
-    (d / up.FAILED_NAME).write_text("rename_old_failed rc=5 tries=10", encoding="gbk")
+    (d / up.FAILED_NAME).write_text("swap_failed: Permission denied old=TokenWidget.exe",
+                                    encoding="gbk")
     orig_check = up.check
     calls: list = []
     up.check = lambda cfg, force=False, **kw: (calls.append(force),
@@ -649,7 +792,7 @@ def u23_panel_failed_note_and_force_open(app, root) -> str:
         panel = settings_panel.SettingsPanel(app)
         panel.withdraw()
         txt = panel.lbl_up.cget("text")
-        assert "上次自动更新未成功" in txt and "rename_old_failed" in txt, txt
+        assert "上次自动更新未成功" in txt and "swap_failed" in txt, txt
         assert not (d / up.FAILED_NAME).exists(), "读后即删（防每次开页重复提醒）"
         panel.destroy()
         # 橙点入口：force 标记 → 面板构建即消费 + 无视 enabled 关也刷一次
@@ -1132,8 +1275,9 @@ CASES_PURE = [
     ("download_atomic", u11_download_atomic),
     ("download_len_mismatch", u12_download_len_mismatch),
     ("download_no_cl_crash", u13_download_no_cl_and_crash),
-    ("cmd_text", u14_cmd_text),
+    ("no_cmd_artifacts", u14_no_cmd_artifacts),
     ("apply_flow", u15_apply_flow),
+    ("swap_seq", u16_swap_seq),
     ("next_trigger_matrix", u16_next_trigger_matrix),
     ("stamp", u17_stamp),
     ("probe", u18_probe),

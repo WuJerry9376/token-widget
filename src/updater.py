@@ -13,9 +13,12 @@
   时回落经代理重试一次（fallback opener 现场 build，语义不变）。
 - 安全纪律：**下载/替换仅在用户明确动作下发生**——定时路径只读发现新版；
   设置页手动「立即下载并更新」+ 二次确认后才 download+apply（防无感替换惊吓）。
-- apply：一次性 restart_update.cmd（ping 等本进程退出 → 旧 exe 改名 .old →
-  move new 就位 → start → 删 .old → 自删；改名失败按次重试）。全程只动
-  local\\update\\ 与 exe 本体，**旧 .dpapi / auth.json 等凭据数据零触碰**。
+- apply（M28 去 cmd 化）：写 pending_swap marker → Popen **staged 新 exe 本体**
+  （DETACHED|NEW_PROCESS_GROUP，零 shell/零可见窗口，带 --post-update-swap
+  --start-marker）→ 本进程退出；新实例启动早期完成改名序列（旧 exe→.old、
+  自身 .new→正名——Windows 允许改运行中映像文件名）。旧 cmd 脚本链因分离态父链
+  触发 Windows「Security validation failure」弹窗且掐死 start，已整体退役。
+  全程只动 local\\update\\ 与 exe 本体，**旧 .dpapi / auth.json 等凭据数据零触碰**。
 - 任何失败路径：清理 .part、返回已脱敏原因、不 crash。
 
 M18（镜像备用源 + SHA-256 信任锚，镜像源裁决落地）：
@@ -59,10 +62,17 @@ PROGRESS_STEP_BYTES = 512 * 1024                    # M19 下载进度节流步�
 
 _UPDATE_REL = Path("update")
 NEW_EXE_NAME = "TokenWidget.new.exe"
-CMD_NAME = "restart_update.cmd"
-FAILED_NAME = "FAILED.txt"                          # M16：cmd 失败兜底落档
+FAILED_NAME = "FAILED.txt"                          # M16：swap 失败兜底落档（消费链不变）
 DAILY_START_HOUR = 5                                # M16：每日 5 点后首帧触发窗
 NEED_ELEVATION = "NEED_ELEVATION:"                  # 前缀标记（面板据此出「提权更新」钮）
+# M28：去 cmd 化重启链——marker 驱动的「新实例自我替换」
+MARKER_NAME = "pending_swap.json"                   # 换装请求（old/new/ts，JSON）
+MARKER_TTL_SECONDS = 600                            # >10min 未消费=陈旧（例外：自 rescuing 见 run_pending_swap）
+SWAP_FLAG = "--post-update-swap"
+SWAP_MARKER_FLAG = "--start-marker"
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+SWAP_DETACH_FLAGS = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
 
 @dataclass
@@ -540,48 +550,6 @@ def probe_replace_permission(exe_path: Path | str | None = None) -> bool:
         return False
 
 
-def render_restart_cmd(new_exe: Path | str, old_exe: Path | str,
-                       cmd_path: Path | str,
-                       failed_path: Path | str | None = None) -> str:
-    """一次性替换脚本（纯函数，测试对文本）。
-
-    时序：ping 等本进程退出 → 旧 exe 改名 .old（占用则重试至多 10 次）→ move new
-    就位（失败回滚改名）→ start 新 exe → 删 .old → 自删 cmd。**只涉两个 exe 路径
-    与 cmd 本身**，local\\ 其余数据零触碰。
-    M16：任一步失败先 echo 步进原因+errorlevel 到 failed_path（默认 cmd 同目录
-    FAILED.txt），供程序下次启动在设置页橙字提示，杜绝静默失败。
-    """
-    new = str(Path(new_exe))
-    old = str(Path(old_exe))
-    cmd = str(Path(cmd_path))
-    fail = str(Path(failed_path)) if failed_path is not None else \
-        str(Path(cmd).parent / FAILED_NAME)
-    return "\r\n".join([
-        "@echo off",
-        "ping -n 4 127.0.0.1 >nul",
-        "set TRIES=0",
-        ":retry",
-        f'move /Y "{old}" "{old}.old" >nul 2>&1',
-        "if not errorlevel 1 goto moved",
-        "set /a TRIES+=1",
-        "if %TRIES% LSS 10 (ping -n 2 127.0.0.1 >nul & goto retry)",
-        f'echo rename_old_failed rc=%errorlevel% tries=%TRIES%> "{fail}"',
-        "goto cleanup",
-        ":moved",
-        f'move /Y "{new}" "{old}" >nul 2>&1',
-        "if not errorlevel 1 goto launch",
-        f'echo move_new_failed rc=%errorlevel%> "{fail}"',
-        f'move /Y "{old}.old" "{old}" >nul 2>&1',
-        "goto cleanup",
-        ":launch",
-        f'start "" "{old}"',
-        f"del /Q \"{old}.old\" 2>nul",
-        ":cleanup",
-        'del /Q "%~f0" 2>nul',
-        "",
-    ])
-
-
 def _writable_dir(base: Path) -> bool:
     try:
         base.mkdir(parents=True, exist_ok=True)
@@ -593,65 +561,292 @@ def _writable_dir(base: Path) -> bool:
         return False
 
 
+# ---------------- M28：去 cmd 化重启链（marker 驱动，新实例自我替换，零可见窗口） ----------------
+#
+# 旧链（≤v1.9.0）病灶：os.spawnv(P_DETACH, cmd /c restart_update.cmd) 的分离态父链
+# 令 Windows「Security validation failure: failed to obtain executable path for
+# parent process」校验在 cmd 内 start 步骤查询父 exe 路径失败 → 弹窗且新实例不被
+# 拉起（改名/搬运在弹窗前已完成，替换本身成功）。新链：下载校验完成后写 marker →
+# 直接 Popen **staged 新 exe 本体**（DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP，
+# 不经任何 shell）带 --post-update-swap --start-marker <path> → 旧实例退出；
+# 新实例启动早期执行改名序列（old→.old 占用重试 → **改名自身 .new→正名**（Windows
+# 允许改运行中 exe 映像文件名，进程继续跑）→ 删 marker → 以正身运行）。
+# 失败路径：写 FAILED.txt（面板既有消费链）→ 照常运行 staged 位置不 brick。
+# 双向兼容硬要求：无 marker 时 run_pending_swap 零副作用（老用户正常启动不受影响）；
+# marker 过期(>10min)视为陈旧自清——唯一例外当前进程即 marker.new（请求是给"我"的，
+# 过期也执行，否则更新链断头）。
+
+def marker_dir_and_path(base: Path | None = None) -> tuple[Path, Path]:
+    """(marker 目录, marker 路径)。默认 update_dir()；提权路径可指 TEMP 可写处。"""
+    d = base if base is not None else update_dir()
+    return d, d / MARKER_NAME
+
+
+def write_marker(old: Path, new: Path, base: Path | None = None,
+                 now: float | None = None) -> Path:
+    """写换装请求 marker（JSON：old/new/ts）。目录不可写抛 OSError 由调用方兜。"""
+    d, mp = marker_dir_and_path(base)
+    d.mkdir(parents=True, exist_ok=True)
+    mp.write_text(json.dumps({"old": str(old), "new": str(new),
+                              "ts": int(time.time() if now is None else now)},
+                             ensure_ascii=False), encoding="utf-8")
+    return mp
+
+
+def _read_marker(mp: Path) -> dict | None:
+    try:
+        m = json.loads(mp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(m, dict):
+        return None
+    old, new = m.get("old"), m.get("new")
+    if not (isinstance(old, str) and old and isinstance(new, str) and new):
+        return None
+    try:
+        ts = int(m.get("ts") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    return {"old": Path(old), "new": Path(new), "ts": ts}
+
+
+def _prune_old_files(exe_dir: Path, keep: int = 1) -> None:
+    """启动顺手清理：tokenwidget*.old 陈旧副本按 mtime 只保留最新 keep 个。永不抛。"""
+    try:
+        olds = sorted((p for p in exe_dir.glob("*.old")
+                       if p.is_file() and p.name.lower().startswith("tokenwidget")),
+                      key=lambda p: p.stat().st_mtime)
+        for p in (olds[:-keep] if keep else olds):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _rename_retry(src: Path, dst: Path, tries: int = 10, delay: float = 0.5,
+                  sleeper=None) -> None:
+    """占用重试改名（旧实例可能尚未完全退出）。全败抛最后一次 OSError。"""
+    import time as _t
+    sleep = sleeper if sleeper is not None else _t.sleep
+    last: OSError | None = None
+    for i in range(tries):
+        try:
+            os.rename(src, dst)
+            return
+        except OSError as e:
+            last = e
+            if i < tries - 1:
+                sleep(delay)
+    raise last or OSError("rename failed")
+
+
+def _image_holder_alive(exe_path: Path) -> bool:
+    """是否有存活进程仍持 exe_path 映像（改名后的 .old 归属判据）。
+
+    仅 CreateToolhelp32Snapshot 快照（TH32CS_SNAPMODULE32|SNAPMODULE），零提权、
+    对 64 位同构进程足够；任何不可读（权限/架构差）→ 保守 False=孤儿判。
+    """
+    import ctypes
+    from ctypes import wintypes
+    name = exe_path.name.lower()
+
+    class ME32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("glbcntUsage", ctypes.c_void_p), ("modcntUsage", wintypes.DWORD),
+                    ("hModule", wintypes.HINSTANCE),
+                    ("modBaseAddr", ctypes.c_void_p), ("modSize", ctypes.c_size_t),
+                    ("szModule", ctypes.c_wchar * 256),
+                    ("szExePath", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(0x18, 0)      # MODULE32|MODULE
+    if snap == -1:
+        return False
+    me = ME32W()
+    me.dwSize = ctypes.sizeof(ME32W)
+    alive = False
+    try:
+        ok = k32.Module32FirstW(snap, ctypes.byref(me))
+        while ok:
+            try:
+                if me.szExePath.lower().endswith("\\" + name):
+                    alive = True
+                    break
+            except ValueError:
+                pass
+            ok = k32.Module32NextW(snap, ctypes.byref(me))
+    finally:
+        k32.CloseHandle(snap)
+    return alive
+
+
+def run_pending_swap(current_exe: Path | str | None = None,
+                     marker_override: Path | str | None = None,
+                     now: float | None = None, sleeper=None) -> str:
+    """新实例启动早期调用：有 marker 才动作，无 marker 零副作用（双向兼容硬要求）。
+
+    序列：先处理**仍占用正名的历史 .old**（旧实例仍持映像=刚完成的换装竞态——
+    仅清 marker 收尾绝不搬回；真孤儿=崩溃残留——搬回正名自修复，防 staged 起不来）
+    → old→old.old（占用重试 10×500ms）→ new→正名
+    （os.replace 同卷原子；new 可能就是**当前运行的自己**——Windows 允许改运行中
+    exe 的文件名，进程续跑）→ 删 marker → 清历史 .old（只留最新 1）。
+    失败：写 FAILED.txt（既有消费链）→ 删 marker（防重启循环）→ 返回 "failed"，
+    调用方照常以 staged 位置运行（不 brick）。
+    marker 过期(>MARKER_TTL_SECONDS)：默认视为陈旧自清不执行；**例外**——本进程
+    即 marker.new（flag 拉起但消费前崩过一次等），过期也执行。
+    返回 ""=无事可做 / "swapped"=已就位 / "failed"=见 FAILED.txt。
+    """
+    cur = Path(current_exe) if current_exe is not None else Path(sys.executable)
+    mp = Path(marker_override) if marker_override is not None else marker_dir_and_path()[1]
+    m = _read_marker(mp)
+    if m is None:
+        if mp.exists():                                   # 坏 marker：清掉防每次启动白读
+            try:
+                mp.unlink()
+            except OSError:
+                pass
+        return ""
+    old, new, ts = m["old"], m["new"], m["ts"]
+    t = time.time() if now is None else float(now)
+    try:
+        self_is_new = new.is_file() and cur.resolve() == new.resolve()
+    except OSError:
+        self_is_new = False
+    if t - ts > MARKER_TTL_SECONDS and not self_is_new:
+        try:
+            mp.unlink()
+        except OSError:
+            pass
+        return ""
+    side = old.with_name(old.name + ".old")
+    if not new.is_file():
+        if not old.is_file() and side.is_file():
+            if _image_holder_alive(side):
+                try:                                      # 旧实例仍在跑 .old：换装已
+                    mp.unlink()                           # 实质完成——仅收尾，禁搬回
+                except OSError:
+                    pass
+                return "swapped"
+            try:                                          # 真孤儿 .old（旧实例崩溃
+                os.replace(side, old)                     # 残留）：搬回正名自修复
+                mp.unlink()
+            except OSError:
+                pass
+            return ""
+        if old.is_file():                                 # 正名已在（成功换装的收尾竞态
+            try:                                          # /重复消费）：清 marker 即止
+                mp.unlink()
+            except OSError:
+                pass
+            return "swapped"
+        return ""
+    fail_path = mp.parent / FAILED_NAME
+    try:
+        _prune_old_files(old.parent, keep=0)              # 历史 .old 全清，腾名位给本轮
+        _rename_retry(old, side, sleeper=sleeper)
+        os.replace(new, old)                              # .new→正名（可改名自己）
+        try:
+            mp.unlink()
+        except OSError:
+            pass
+        return "swapped"
+    except (OSError, ValueError) as e:
+        try:
+            fail_path.write_text(
+                f"swap_failed: {str(e)[:120]} old={old.name} new={new.name}",
+                encoding="gbk", errors="replace")
+        except OSError:
+            pass
+        try:
+            mp.unlink()
+        except OSError:
+            pass
+        return "failed"
+
+
+def _shell_runas(exe: Path, args: list[str]) -> int:
+    """ShellExecuteW "runas"（一次 UAC，替代 PS -Verb RunAs 包 cmd）；返回 HINSTANCE。
+
+    >32=成功；≤32 含 1223（用户取消 UAC）。独立函数=测试注入点。
+    """
+    import ctypes
+    from ctypes import wintypes
+    params = " ".join(f'"{a}"' for a in args)
+    se = ctypes.windll.shell32.ShellExecuteW
+    se.restype = ctypes.c_long
+    se.argtypes = (wintypes.HWND, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                   ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int)
+    return se(None, "runas", str(exe), params, None, 0)       # SW_HIDE
+
+
 def apply_update_and_restart(new_exe: Path | str | None = None,
                              current_exe: Path | str | None = None,
-                             spawn=None, exit_fn=None, elevated: bool = False,
-                             probe=None) -> str:
-    """写 restart_update.cmd → 分离进程执行 → 本进程退出。返回 ""=已接管，否则原因。
+                             popen=None, exit_fn=None, elevated: bool = False,
+                             probe=None, runas=None) -> str:
+    """M28 新链：写 marker → Popen staged 新 exe 本体（--post-update-swap +
+    --start-marker，DETACHED|NEW_PROCESS_GROUP，零 shell）→ 本进程退出。
+    返回 ""=已接管，否则原因（不退出）。
 
     - current_exe：默认 sys.executable（frozen=TokenWidget.exe 本体）；测试注入。
     - new_exe：默认 staging 的 TokenWidget.new.exe；调用前须已 download_and_stage。
-    - probe：目录可写预检替身（测试注入；None=真 probe_replace_permission）。
-    - M16 权限加固：预检失败且未提权 → 返回 NEED_ELEVATION 前缀原因（不退出、
-      不 spawn）；面板据此出「提权更新」钮，提权重试 elevated=True 经
-      PowerShell Start-Process -Verb RunAs（一次 UAC；cmd 逻辑不变仅借提权执行）。
-      连 staging/cmd 目录都不可写 → 直接给移动位置指引。
-    - spawnv/exit_fn：测试注入替身（默认 os.spawnv P_DETACH + os._exit(0)）。
+    - probe/exit_fn：测试注入（预检、退出替身）；popen：Popen 替身；runas：_shell_runas 替身。
+    - 预检失败且未提权 → NEED_ELEVATION 前缀（面板出「提权更新」钮，行为不变）；
+      elevated=True → ShellExecuteW runas 直接提权拉新 exe（一次 UAC；exe 目录
+      不可写时 marker 落 %TEMP% 可写处、路径随参数传）；runas 被拒 → 既有指路文案。
     """
     cur = Path(current_exe) if current_exe is not None else Path(sys.executable)
     new = Path(new_exe) if new_exe is not None else update_dir() / NEW_EXE_NAME
     if not new.is_file():
-        return "尚未下载更新包（先「立即下载并更新」）"
+        return "尚未下载更新包（先「立即更新」）"
     if cur.name.lower() == new.name.lower():
         return "当前运行体不是 TokenWidget.exe（dev 模式不支持自更新）"
     check = probe_replace_permission if probe is None else probe
+    marker_base: Path | None = None
     if not check(cur):                               # 预检失败 → 不退出，交回面板决策
         if not elevated:
             return NEED_ELEVATION + "当前目录无写入权限，可选提权更新或移动位置"
-        # 提权路径：cmd 必须落在可写处（exe 目录不可写时退 %TEMP%）
         base = update_dir()
         if not _writable_dir(base):
             base = Path(os.environ.get("TEMP", str(Path.home()))) / "token-widget-update"
             if not _writable_dir(base):
                 return "当前目录无写入权限：请先把程序移到可写目录（如用户目录）再更新"
-    else:
-        base = update_dir()
-        base.mkdir(parents=True, exist_ok=True)
-    cmd_path = base / CMD_NAME
-    fail_path = base / FAILED_NAME
+        marker_base = base
     try:
-        cmd_path.write_text(render_restart_cmd(new, cur, cmd_path, fail_path),
-                            encoding="gbk", errors="replace")
+        mp = write_marker(cur, new, base=marker_base)
     except OSError as e:
-        return f"无法写入重启脚本：{str(e)[:80]}"
-    spawnv = spawn if spawn is not None else os.spawnv
-    comspec = os.environ.get("COMSPEC", "cmd.exe")
+        return f"无法写入换装请求：{str(e)[:80]}"
+    if elevated:
+        rf = runas if runas is not None else _shell_runas
+        try:
+            rc = rf(new, [SWAP_FLAG, SWAP_MARKER_FLAG, str(mp)])
+        except OSError as e:
+            try:
+                mp.unlink()
+            except OSError:
+                pass
+            return f"提权启动失败：{str(e)[:80]}"
+        if rc <= 32 or rc == 1223:                    # 1223=ERROR_CANCELLED（UAC 被拒，
+            # 该失败码数值上 >32，是 ShellExecuteW 返回约定的唯一例外）
+            try:
+                mp.unlink()
+            except OSError:
+                pass
+            return "提权被取消：请把程序移到可写目录（如用户目录）再更新"
+        (exit_fn or os._exit)(0)
+        return ""
+    import subprocess
+    popenf = popen if popen is not None else subprocess.Popen
     try:
-        if elevated:
-            ps = os.environ.get("SystemRoot", r"C:\Windows") + \
-                r"\System32\WindowsPowerShell\v1.0\powershell.exe"
-            # 一次 UAC：Start-Process -Verb RunAs 包 cmd；PowerShell 自身不需要管理员
-            spawnv(os.P_DETACH, ps, [
-                ps, "-NoProfile", "-Command",
-                f"Start-Process -FilePath cmd.exe -ArgumentList '/c','{cmd_path}' "
-                "-Verb RunAs -WindowStyle Hidden"])
-        else:
-            spawnv(os.P_DETACH, comspec, [comspec, "/c", str(cmd_path)])
+        popenf([str(new), SWAP_FLAG, SWAP_MARKER_FLAG, str(mp)],
+               creationflags=SWAP_DETACH_FLAGS, close_fds=True)
     except OSError as e:
         try:
-            cmd_path.unlink(missing_ok=True)
+            mp.unlink()
         except OSError:
             pass
-        return f"无法启动更新脚本：{str(e)[:80]}"
+        return f"无法启动新实例：{str(e)[:80]}"
     (exit_fn or os._exit)(0)
     return ""

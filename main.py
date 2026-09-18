@@ -7,6 +7,7 @@
     python main.py --print-geometry     # 窗口尺寸变化时打印几何（截图定位用）
     python main.py --open-settings      # 启动后即开设置面板（调试/截图）
     python main.py --autostart-dry-run  # 打印将写入的自启注册表值，不写注册表
+    python main.py --post-update-swap [--start-marker <json>]  # M28 换装（更新链内部用）
     python main.py --verbose            # stdout 输出每轮采集摘要（不含凭据）
 
 DPI：在创建 Tk 窗口前用 ctypes 设进程 awareness（M26 起优先 PER_MONITOR_AWARE_V2，
@@ -86,7 +87,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="启动后即打开凭据续期面板（调试）")
     ap.add_argument("--autostart-dry-run", action="store_true",
                     help="打印将写入 HKCU Run 的 token-widget 值后退出，不做任何写操作")
+    ap.add_argument("--post-update-swap", action="store_true",
+                    help="更新链标记（M28）：本进程为 staged 新实例，启动早期完成换装；"
+                         "无此标记亦检测 pending_swap marker（marker 驱动更鲁棒，见 updater）")
+    ap.add_argument("--start-marker", default=None,
+                    help="pending_swap.json 路径覆盖（默认 local/update/；提权链落 TEMP 时显式传入）")
     args = ap.parse_args(argv)
+
+    # M28 换装序列（必须早于任何窗口/文件锁建立）：marker 驱动、无 marker 零副作用。
+    # 改名自身（.new→正名）在 Windows 合法、进程续跑；失败写 FAILED.txt 照常运行。
+    try:
+        from src import updater as _updater
+        _sw = _updater.run_pending_swap(marker_override=args.start_marker)
+        if _sw and args.verbose:
+            print(f"[main] post-update swap: {_sw}", flush=True)
+    except Exception as e:                            # noqa: BLE001 换装绝不拦启动
+        if args.verbose:
+            print(f"[main] swap skipped: {type(e).__name__}", flush=True)
 
     from src import autostart as autostart_mod
     if args.autostart_dry_run:
