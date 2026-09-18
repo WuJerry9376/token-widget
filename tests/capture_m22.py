@@ -1,22 +1,23 @@
-"""M22b（M23 后重出）：三供应商「健康态」门面模拟图（dev-only，产物全部落 local\，不上 GitHub）。
+"""M22b（M25/M26 后同步 v1.9.0 真态）：三供应商「健康态」门面模拟图（dev-only，产物全部落 local\，不上 GitHub）。
 
 运行：`python tests\\capture_m22.py`（桌面会话）。数据=随机但语义真实的演示值
 （与 M20-A 同口径：假 Usage 注入渲染层，与真数据同一条 usages→_render 路径）：
 - 百炼 pro：7d 已用 31.6%（剩 27,360）＋加油包 8,412/20,000 → 大数字 35,772=Σfloor；
   重置 2d04h；**M23 套餐到期：plan_end=2026-10-11（>7 天 → 灰档 SOFT_TXT），
   C 行尾追加「 · 套餐 10-11 到期」（canvas 项文本+色双断言）**。
-- OpenCode Go（percent，无绝对额度）：5h 主条 62%（大数字=剩余占比 38%）＋
-  周窗 18% 副行；两个倒计时。
-- Codex plus：5h 主条 41%＋周窗 8% 双主条（大数字 59%）＋券×1 角标；积分余额进 tooltip。
+- OpenCode Go（M24B 三主条含日；M24C 去波浪号）：5h 62% / 日 35% / 周 18%，
+  大数字=最紧窗剩余 38%；三根等尺寸条，行高第 3 窗 +28（与 M24 门面同账）。
+- Codex plus：5h 41%＋周 8% 双主条（M24B 短名去「窗」；大数字 59%）＋券×1 角标；积分余额进 tooltip。
 三家 fetched_at 同值 → 标题行更新时间一致；↻ 静止；_upd_new=None（无橙点）。
 
-产物（local\）：preview_m22_note.png / preview_m22_note_hover.png /
+产物（local\，gitignored）：preview_m22_note.png / preview_m22_note_hover.png /
 preview_m22_settings.png / preview_m22.gif（静置↔hover 两帧）。
 
 纪律：零网络（updater.check 打桩 skipped）；config/state/auth 写盘与凭据探测文件
 全部重定向 temp（真实 local 目录三件哈希前后必须一致，报告打印）；不新增产品代码；
 git 零动作。渲染断言：三行 kind 全 full/stale=False/cred=False；大数字/分项自洽；
-画面无 ORANGE 像素残留（橙点/凭据警示/更新中三类橙源全部排除）。
+**M25 全画面零「窗口」、条行 label 零「窗」/「~」（与 capture_m24 同一禁字基准）**；
+foot=动态 v{APP_VERSION}（M25 后不再钉死具体版本）；画面无 ORANGE 像素残留。
 """
 from __future__ import annotations
 
@@ -82,11 +83,15 @@ def u_bailian() -> Usage:
 
 
 def u_go() -> Usage:
-    """OpenCode Go：percent 语义无绝对额度；rolling(5h) 62% 主条 + weekly 18% 副行。"""
-    r5, wk = _FETCHED + timedelta(hours=3, minutes=5), _FETCHED + timedelta(days=4, hours=11)
+    """M24B OpenCode Go 三主条（含日；M24C 去波浪号）：5h 62% / 日 35% / 周 18%
+    （source 定稿 label，与 capture_m24 门面同一数据基准）；大数字=最紧窗剩余 38%。"""
+    r5 = _FETCHED + timedelta(hours=3, minutes=5)
+    day = _FETCHED + timedelta(hours=17, minutes=40)
+    wk = _FETCHED + timedelta(days=4, hours=11)
     return Usage(provider="opencode_go", ok=True, spec=None, unit="percent",
                  pct_used=0.62, resets_at=r5,
-                 windows=[Window("rolling", 0.62, r5), Window("weekly", 0.18, wk)],
+                 windows=[Window("5h", 0.62, r5), Window("日", 0.35, day),
+                          Window("周", 0.18, wk)],
                  fetched_at=_FETCHED)
 
 
@@ -187,7 +192,17 @@ def main_run(tmp: Path) -> int:
         ok &= "35,772" in joined and "27,360" in joined and "8,412" in joined
         ok &= "38%" in joined and "59%" in joined                  # Go/Codex 大数字
         ok &= "周 · 已用 8.0%" in joined and "5h · 已用 41.0%" in joined   # M24B：去「窗」
-        ok &= "5h · 已用 62.0%" in joined and "周 · 已用 18.0%" in joined  # M24B：Go 多主条（M24C 去波浪号）
+        # M24B 三主条（含日）/M24C 去波浪号：Go=5h·日·周 三条文案锁（capture_m24 同基准）
+        ok &= ("5h · 已用 62.0%" in joined and "日 · 已用 35.0%" in joined
+               and "周 · 已用 18.0%" in joined)
+        # M25：全画面零「窗口」；条行 label（Go5h/日/周+Codex5h/周+百炼 7d）零「窗」、零「~」
+        bar_labels = [t for t in ts if "· 已用" in t
+                      and t.startswith(("5h ", "日 ", "周 ", "7d "))]
+        ok &= (len(bar_labels) == 6 and "周窗" not in joined and "窗口" not in joined
+               and "~5h" not in joined
+               and all("窗" not in t and "~" not in t for t in bar_labels))
+        if not ok:
+            print("禁字失败:", bar_labels, flush=True)
         ok &= "券×1" in joined
         ok &= not any(w in joined for w in FORBIDDEN)
         ok &= app._upd_new is None and not app.fetching
@@ -205,6 +220,11 @@ def main_run(tmp: Path) -> int:
 
         x, y, w, h = cap.win_rect(app.root)
         print(f"note = {w}x{h} @ ({x},{y})", flush=True)
+        # M24B 三主条高度账（本机 scaling=1.5 实值，与 capture_m24 note 495x639 同账）
+        size_ok = (w, h) == (495, 639)   # Go 第 3 窗 +28 账；异常时打印不中断截图
+        if not size_ok:
+            print(f"NOTE: note 应 495x639（M24 三主条账），得 {w}x{h}", flush=True)
+        ok &= size_ok
 
         # ---- 1) 静置主浮窗 ----
         park_cursor()
@@ -276,8 +296,7 @@ def main_run(tmp: Path) -> int:
         ok &= ("__CHK__百炼 Token Plan__1" in j and "__CHK__OpenCode Go__1" in j
                and "__CHK__Codex__1" in j)
         ok &= "127.0.0.1" in j and "7890" in j
-        ok &= f"v{version_mod.APP_VERSION} · by Jerry Wu" in j
-        ok &= "v1.8.2" in j
+        ok &= f"v{version_mod.APP_VERSION} · by Jerry Wu" in j   # 动态版本锁（M25 后不钉死）
         px_panel, py_panel, pw, ph = cap.win_rect(panel)
         park_cursor()
         cap.grab(px_panel, py_panel, pw, ph).save(OUT / "preview_m22_settings.png")
