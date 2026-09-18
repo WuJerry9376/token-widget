@@ -618,7 +618,7 @@ def p3_ui_rows_tooltip(app, root) -> str:
     feed(app, uo)
     assert "other" not in texts_join(app), "other:N 行内不得出现"
     assert float(app.canvas.cget("height")) == h2w, "other:N 不得占高度"
-    assert "other:21600 窗口：已用 42.0%" in app._tip_text(
+    assert "other:21600 · 已用 42.0%" in app._tip_text(
         {"u": uo, "err": None, "stale": False}), "tooltip 仍须全列未知窗"
     # —— 阈值色独立判定：周窗逼近红线而 5h 窗仍绿 ——
     uc = u_ok_codex(windows=[Window("5h", 0.62, _NOW + timedelta(hours=2, minutes=1)),
@@ -675,7 +675,7 @@ def p3_ui_rows_tooltip(app, root) -> str:
     tip = app._tip_text({"u": u, "err": None, "stale": False})
     assert "积分余额 $12.35（实验性源）" in tip, tip
     assert "加油包" not in tip and "7 天周期" not in tip, tip
-    assert "5h 窗口：已用 62.0%" in tip and "周 窗口：已用 30.0%" in tip, tip
+    assert "5h · 已用 62.0%" in tip and "周 · 已用 30.0%" in tip, tip   # M25：tooltip 去「窗口」
     h1 = float(app.canvas.cget("height"))
     feed(app, u_ok_codex(addon_remaining=None))
     assert float(app.canvas.cget("height")) == h1, "积分不进加油包条占位"

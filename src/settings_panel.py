@@ -746,6 +746,23 @@ class SettingsPanel(_Card):
         self._gh_set("faint")
         self._gh_tip(False)
 
+    def on_dpi_rescale(self) -> None:
+        """M26：面板开着时 DPI 档切换 → foot 图标按新 S 重选档并重挂。
+
+        其余无需动作：面板全部文字用 app 的**共享 Font 对象**（负像素制，
+        ui.NoteApp._rescale_fonts 原地 configure 即跟随）；面板布局为固定 px，
+        不随 S 缩放（wraplength/padx 语义 M3c 起即如此）。缺新档素材→图标隐藏
+        （同构建律：绝不让素材问题拖垮设置页）。"""
+        tier = _gh_tier(self.app.S)
+        if tier == getattr(self, "_gh_px", None) and self._gh_imgs:
+            return
+        self._gh_px = tier
+        try:
+            self._gh_imgs = _gh_pair(tier, self)
+        except Exception:                               # noqa: BLE001 缺素材→隐藏
+            self._gh_imgs = {}
+        self._up_sync_gh_icon()
+
     def _gh_tip(self, show: bool) -> None:
         """迷你 tooltip（foot 图标专用；主窗 _tip 语言同款色档）。"""
         if show:
@@ -1245,10 +1262,10 @@ class CredentialPanel(_Card):
                           "请确认 Cookie 来自已登录的百炼控制台、且为整串未截断。", RED)
             else:
                 self._say(f"保存成功。本轮拉取返回 {code}——非凭据问题，"
-                          "浮窗会自动退避重试，可关闭本窗口观察。", ORANGE)
-            return
-        if time.time() - self._saved_at > 60:
-            self._say("验证超时：拉取尚未回来。可关闭窗口，浮窗会自动重试。", ORANGE)
+                          "浮窗会自动退避重试，可关闭本面板观察。", ORANGE)
+                return
+            if time.time() - self._saved_at > 60:
+                self._say("验证超时：拉取尚未回来。可关闭本面板，浮窗会自动重试。", ORANGE)
             return
         self.after(2000, self._verify)
 
@@ -1311,7 +1328,7 @@ class ProviderKeyPanel(_Card):
     def _build_go(self) -> None:
         app = self.app
         tk.Label(self.body, text=(
-            "Go key 用于拉取 rolling(5h)/周/月 窗口百分比（官方 usage API）。\n"
+            "Go key 用于拉取 rolling(5h)/周/月 用量百分比（官方 usage API）。\n"
             "登录过 opencode 的机器可自动检测（auth.json 的 opencode-go 条目）；\n"
             "⚠️ Zen key 不通用（打此端点必 403），自动检测绝不会采用。"),
             justify="left", font=app.f_small, **_tk_colors()).pack(anchor="w")
@@ -1335,7 +1352,7 @@ class ProviderKeyPanel(_Card):
         """M10 Codex（实验性）：检测结果行（尾 4 位）+ 手动粘贴 access_token + 保存即验证。"""
         app = self.app
         tk.Label(self.body, text=(
-            "用 ChatGPT 订阅的 OAuth access_token 拉取 Codex 5h/周 窗口限额。\n"
+            "用 ChatGPT 订阅的 OAuth access_token 拉取 Codex 5h/周 用量限额。\n"
             "⚠️ 实验性：非官方接口，可能随时失效；与 OpenAI 平台 key 完全不互通。\n"
             "自动读取（按序）：local\\auth.json → 项目根/exe 同级 auth.json → "
             "~\\.codex\\auth.json\n（Codex CLI 登录产物；均需 auth_mode=chatgpt；"
@@ -1473,8 +1490,8 @@ class ProviderKeyPanel(_Card):
                     msg += f" · 预算 {fmt_value(u.total, 'usd')}"
             elif u.unit == "percent" and u.pct_used is not None:
                 _w0 = u.windows[0] if u.windows else None
-                lab = WIN_LABELS.get(_w0.label, _w0.label) if _w0 else "窗口"
-                msg = f"✓ 验证成功：{lab} 窗口已用 {u.pct_used:.0%}"
+                lab = WIN_LABELS.get(_w0.label, _w0.label) if _w0 else "用量"
+                msg = f"✓ 验证成功：{lab} 已用 {u.pct_used:.0%}"
             else:
                 msg = "✓ 验证成功"
             self._say(msg, OK)

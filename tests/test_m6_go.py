@@ -605,7 +605,7 @@ def u2_percent_row(app, root):
 
 def u5_go_codex_no_win_char_scan(app, root):
     """M24B 全画面禁字：Go(3窗)+Codex(5h/周·含券) 同屏——codex「周窗」已同步改「周」。
-    注：百炼通用行的「7d 窗口 · 已用」不在本裁决范围（M24B 只裁决条行/Go/codex 短名）。"""
+    注：百炼通用行的「窗口」已由 M25 全局裁决删除（本案例画面仅 Go+Codex 两行）。"""
     feed(app,
          Usage(provider="opencode_go", ok=True, unit="percent", pct_used=0.62,
                resets_at=_NOW + timedelta(hours=3),

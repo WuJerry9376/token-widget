@@ -45,6 +45,18 @@
   每窗 +GO_BAR_PITCH=28，与 codex 高度账同族）；C 条内高光线改绝对像素阈
   （填充宽 ≥BAR_HI_MIN_PX=24 逻辑 px 才画，替代 M7b⑤「<15% 轨宽」——双主条
   并排观感一致：小窗两条都无、大窗两条都有）。
+- M26 高 DPI（PMv2）：main.py 在 Tk() 前把进程 awareness 升到
+  PER_MONITOR_AWARE_V2（失败逐级回退 system→经典，不崩）。感知方案选型=**轮询
+  GetDpiForWindow**（挂在既有 _drain 250ms 循环，非子类化 hook）：理由 ① Tk 的
+  WndProc 栈深且经 Tcl 事件泵，Python ctypes 回调在消息派发中重进解释器是崩溃面；
+  ② PMv2 下 WM_DPICHANGED 由 DefWindowProc 默认处理即套推荐矩形，我们只需"感知"
+  DPI 差值重定标，无需"截获"消息本体；③ 250ms 一记 user32 调用成本≈0、跨屏延迟
+  不可感知，且窗口未建/probe 失败时静默降级（行为=改造前 system-aware）。
+  收口路径 on_dpi_change(dpi)：S=GetDpiForWindow/96 → tk scaling=dpi/72 →
+  字体负像素制原地 configure（共享 Font 对象，设置面板/tooltip/菜单自动跟随）→
+  _render 全量重绘 → 按新 work_areas 重钳位。外部强制 tk scaling 的开发/门面环境
+  （S≠真实窗口 DPI）不开 watch，防把强制档洗回。_ROT_IMGS/gh 资产按 (master,S) /
+  档位 memo，新 S 自然出新档，无脏渲。
 - M11c 第 5 轮视觉打磨：①codex 窗短名「周窗」（去「周 窗口」拼接空格；5h 由 M11d 去「窗」），
   副细条尾注整句统一 f_note 浅灰常规（原 f_tiny 下 CJK「后重置」视觉比数字重一档）；②券×N
   字重与 PLUS 同档（SOFT 灰褐，角标是配角）；③细条方向语义定案：主条一律**已用向**；
@@ -225,7 +237,8 @@ def codex_win_caption(label: str) -> str:
     """M11c①/M11d②/M24B 条行窗短名：一律**无「窗」字**——「周窗」→「周」，
     5h/日 原样（M24B 把 codex 最后残留的「周窗」也去了；Go 多主条同用本函数）。
 
-    仅多主条支路（codex/Go）使用；通用行（百炼）的「{label} 窗口 · 已用」拼接不动。"""
+    仅多主条支路（codex/Go）使用；通用行（百炼）的「{label} · 已用」拼接由 M25
+    同步去「窗口」（原「{label} 窗口 · 已用」），两侧语法自此一致。"""
     lab = win_label(label)
     return lab[:-1] if lab.endswith("窗") and len(lab) > 1 else lab
 
@@ -442,6 +455,57 @@ def work_areas() -> list[tuple[int, int, int, int]]:
     return areas or [work_area()]
 
 
+# ---------- M26 高 DPI 纯函数层（fake 注入可单测；渲染路径只消费这些换算） ----------
+
+def font_pixel_size(size_in: float, S: float) -> int:
+    """字体负像素制（Tk：负 size=设备 px，随 DPI 精确、无 point 取整误差）。
+
+    size_in 沿用历史命名=「96dpi 下的 px 字号」。下限 9px 保留（M2 审查：过小
+    CJK 糊）；返回负值直接喂 tkfont.Font(size=…)。"""
+    return -max(9, round(size_in * S))
+
+
+def clamp_to_workarea(x: int, y: int, w: int, h: int,
+                      areas: list[tuple[int, int, int, int]]) -> tuple[int, int]:
+    """窗矩形 (x,y,w,h) → 钳进「重叠面积最大」的工作区。纯函数（M26：DPI 变更
+    重钳位与 _place_initial 共用；areas 空 = 透传）。"""
+    if not areas:
+        return int(x), int(y)
+
+    def ov(a: tuple[int, int, int, int]) -> int:
+        return max(0, min(x + w, a[2]) - max(x, a[0])) * \
+            max(0, min(y + h, a[3]) - max(y, a[1]))
+
+    l, t, r, b = max(areas, key=ov)
+    return (max(l, min(int(x), max(l, r - w))),
+            max(t, min(int(y), max(t, b - h))))
+
+
+_GA_ROOT = 2          # GetAncestor：取顶层框架窗（DPI/消息归属者）
+
+
+def _root_hwnd(widget: tk.Misc) -> int:
+    """Tk 内部窗 → 顶层 HWND（GetDpiForWindow 要问的是框架窗）；失败 0。"""
+    try:
+        wid = int(widget.winfo_id())
+    except (tk.TclError, ValueError):
+        return 0
+    try:
+        return int(ctypes.windll.user32.GetAncestor(wt.HWND(wid), _GA_ROOT)) or wid
+    except Exception:
+        return wid
+
+
+def _dpi_for_hwnd(hwnd: int) -> int:
+    """GetDpiForWindow（Win10 14393+）；老系统/失败 → 0（调用方视作不可轮询）。"""
+    if not hwnd:
+        return 0
+    try:
+        return int(ctypes.windll.user32.GetDpiForWindow(wt.HWND(hwnd)))
+    except Exception:
+        return 0
+
+
 def snap_target(pos: tuple[int, int], size: tuple[int, int],
                 areas: list[tuple[int, int, int, int]],
                 threshold: float) -> tuple[int, int] | None:
@@ -603,6 +667,15 @@ class NoteApp:
         self.S = max(0.5, float(root.tk.call("tk", "scaling")) * 72.0 / 96.0)
         self._make_fonts()
 
+        # ---- M26 PMv2 感知：每轮 _drain 比对 GetDpiForWindow（选型理由见模块头）。
+        #      watch 仅在「窗口 DPI 与启动 S 一致」时开启——capture/dev 用
+        #      `tk scaling` 强制刻度（如 1.5）渲染门面时真实窗 DPI=96，若开 watch
+        #      会把强制档洗回 1.0，故此种环境自动禁用。----
+        self._hwnd = _root_hwnd(root)
+        self._dpi_probe = lambda: _dpi_for_hwnd(self._hwnd)   # 测试可换 fake 源
+        d0 = self._dpi_probe()
+        self._dpi_watch = bool(d0) and abs(d0 / 96.0 - self.S) <= self.DPI_EPS
+
         # ---- 数据状态 ----
         self.usages: list[Usage] = []
         self.meta: dict = {}
@@ -652,6 +725,8 @@ class NoteApp:
 
     # ================= 字体 / 尺寸 =================
 
+    DPI_EPS = 0.02       # M26：S 与窗口 DPI 差的容忍（小于此值视为同档，不动作）
+
     def _make_fonts(self) -> None:
         fams = set(tkfont.families(self.root))
 
@@ -661,10 +736,17 @@ class NoteApp:
                     return c
             return "TkDefaultFont"
 
+        self._fspecs: list[tuple[tkfont.Font, float]] = []
+
         def F(family: str, size_in: float, bold: bool = False) -> tkfont.Font:
-            return tkfont.Font(root=self.root, family=family,
-                               size=-max(9, round(size_in * self.S)),
-                               weight="bold" if bold else "normal")
+            # M26 审计：全部字档一律**负像素制**（font_pixel_size），并经
+            # _fspecs 记账——DPI 变更时原地 configure，持有共享引用的
+            # 一切控件（画布/tooltip/菜单/设置面板）自动跟随，无需重建。
+            f = tkfont.Font(root=self.root, family=family,
+                            size=font_pixel_size(size_in, self.S),
+                            weight="bold" if bold else "normal")
+            self._fspecs.append((f, size_in))
+            return f
 
         cjk = pick("Microsoft YaHei UI", "Microsoft YaHei", "SimHei")
         num = pick("Georgia", "Cambria", "Times New Roman")
@@ -681,6 +763,71 @@ class NoteApp:
 
     def _p(self, v: float) -> float:
         return v * self.S
+
+    # ---- M26 DPI 档切换（感知在 _drain，收口在本节；测试直接调 on_dpi_change） ----
+
+    def _rescale_fonts(self) -> None:
+        """按当前 S 原地重设全部字档负像素尺寸（共享 Font 对象 → 全控件跟随）。"""
+        for f, size_in in self._fspecs:
+            try:
+                f.configure(size=font_pixel_size(size_in, self.S))
+            except tk.TclError:
+                pass
+
+    def _check_dpi(self) -> None:
+        """_drain 每轮调用：窗口 DPI 与 S 差超容忍 → 走 on_dpi_change 收口。
+        probe 不可得（0，老系统/句柄失效）或 watch 被 dev 强制刻度禁用 → 静默。"""
+        if not self._dpi_watch or self._quitting:
+            return
+        try:
+            dpi = int(self._dpi_probe())
+        except Exception:
+            return
+        if dpi and abs(dpi / 96.0 - self.S) > self.DPI_EPS:
+            self.on_dpi_change(dpi)
+
+    def on_dpi_change(self, dpi: int) -> None:
+        """单点收口：S/tk scaling/字体/重绘/钳位一次完成（PMv2 跨屏或系统缩放变更）。
+
+        顺序=先系数后像素：S→scaling→font configure→_render（canvas 宽高按新 S
+        重设并经 after_idle _sync_size 落窗）→ 按当前显示器工作区重钳位。
+        设置面板若开着：foot 图标按新档重选（其余布局非 S 依赖，字档共享自动跟）。"""
+        s = max(0.5, int(dpi) / 96.0)
+        if abs(s - self.S) <= self.DPI_EPS:
+            return
+        self.S = s
+        try:
+            self.root.tk.call("tk", "scaling", int(dpi) / 72.0)
+        except tk.TclError:
+            pass
+        self._rescale_fonts()
+        try:
+            self._render()
+        except tk.TclError:
+            return                      # 窗口销毁中：静默退出
+        self._reclamp_position()
+        panel = self._settings
+        if panel is not None:
+            try:
+                if panel.alive():
+                    panel.on_dpi_rescale()
+            except Exception:               # noqa: BLE001 面板异常绝不拖垮主窗
+                pass
+        if self.verbose:
+            print(f"[ui] DPI→{dpi}（S={s:.3f}，watch={self._dpi_watch}）", flush=True)
+
+    def _reclamp_position(self) -> None:
+        """M26：DPI 变更后按新屏几何重钳位（拖拽中由释放路径接管，不抢位）。"""
+        if self._drag_off is not None:
+            return
+        w, h = self._win_size()
+        x, y = clamp_to_workarea(self._pos[0], self._pos[1], w, h, work_areas())
+        self._pos = (int(x), int(y))
+        try:
+            self.root.geometry(f"{w}x{h}+{self._pos[0]}+{self._pos[1]}")
+        except tk.TclError:
+            return
+        self._print_geometry_line(w, h)
 
     # ---- M12④ ↻ 图标：4× 超采样纯 stdlib 光栅化（Tk 无抗锯齿的替代） ----
     #
@@ -764,12 +911,13 @@ class NoteApp:
     def _place_initial(self) -> None:
         w = self._win_w()
         h = int(self.canvas.winfo_reqheight())
-        l, t, r, b = work_area()
         x, y = self.init_state.get("x"), self.init_state.get("y")
         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-            x = max(l, min(int(x), max(l, r - w)))   # 换显示器/分辨率时钳回工作区
-            y = max(t, min(int(y), max(t, b - h)))
+            # M26：换显示器/分辨率/DPI 档时钳回**重叠最大**工作区（clamp_to_workarea
+            # 与 DPI 变更重钳位共用同一纯函数；旧版只按主屏 work_area 钳）
+            x, y = clamp_to_workarea(int(x), int(y), w, h, work_areas())
         else:
+            l, t, r, b = work_area()
             x, y = r - w - 24, t + 24                # 默认右上
         self._pos = (int(x), int(y))
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -972,8 +1120,8 @@ class NoteApp:
                  + (f" · 档位 {spec_display(u)}" if u.spec else "")]
         for wn in u.windows:
             lab = WIN_LABELS.get(wn.label, wn.label)
-            seg = [f"{lab} 窗口：已用 {wn.pct_used:.1%}" if wn.pct_used is not None
-                   else f"{lab} 窗口：暂无百分比"]
+            seg = [f"{lab} · 已用 {wn.pct_used:.1%}" if wn.pct_used is not None
+                   else f"{lab} · 暂无百分比"]
             if wn.resets_at is not None:
                 seg.append(f"{_local(wn.resets_at):%m-%d %H:%M} 重置")
             lines.append(" · ".join(seg))
@@ -1150,6 +1298,7 @@ class NoteApp:
             print(f"[ui] 渲染异常（已跳过本轮）：{type(e).__name__}: {str(e)[:160]}",
                   flush=True)
         self._upd_drain()                       # M16：同循环顺带消费自动更新结果（无新轮询）
+        self._check_dpi()                       # M26：每轮比对窗口 DPI（1 记 user32 调用）
         self.root.after(250, self._drain)
 
     def _log_cycle(self, usages: list[Usage], meta: dict) -> None:
@@ -1637,7 +1786,7 @@ class NoteApp:
             x = self._badge(x, P(y + 12), f"券×{n_tk}",
                             FAINT if stale else SOFT, BADGE_BG, BADGE_EDGE)
             self.hits.append((bx0, P(y + 12) - P(9.5), x - P(6), P(y + 12) + P(9.5),
-                              {"tip": f"窗口重置券 ×{n_tk}：额度耗尽时可提前重置窗口"
+                              {"tip": f"重置券 ×{n_tk}：额度耗尽时可提前重置"
                                        "（实验性接口计数）"}))
 
         big, left = breakdown_display(u)      # 大数字与 C 行分项同源，保证 Σ 自洽
@@ -1672,15 +1821,15 @@ class NoteApp:
 
         # B 行：主窗口标签 + 倒计时；进度条（Go 的 rolling 经 WIN_LABELS 显示为 "5h"）
         main_w = u.windows[0] if u.windows else None
-        label = WIN_LABELS.get(main_w.label, main_w.label) if main_w else "主窗口"
+        label = WIN_LABELS.get(main_w.label, main_w.label) if main_w else "主窗"
         pct_used = u.pct_used
         reset_dt = u.resets_at or (main_w.resets_at if main_w else None)
         if main_w is None:      # 无窗口概念（OpenAI 预算/余额）→ 直接额度文案
             left_txt = f"额度 · 已用 {pct_used:.1%}" if pct_used is not None \
                 else "暂无百分比数据"
         else:
-            left_txt = f"{label} 窗口 · 已用 {pct_used:.1%}" if pct_used is not None \
-                else f"{label} 窗口 · 暂无百分比数据"
+            left_txt = f"{label} · 已用 {pct_used:.1%}" if pct_used is not None \
+                else f"{label} · 暂无百分比数据"      # M25：去「窗口」（全画面零该字样）
         # M3c 数据口径注记：含加油包时百分比分母是周期额度而非合计，防误读
         # （例：已用 62.1% = 24,853/40,000，而 60,000 为含加油包合计）。
         if pct_used is not None and u.addon_remaining is not None and u.total is not None:
@@ -1749,8 +1898,8 @@ class NoteApp:
         # D 行（可选）：主行之外的窗口逐条副显（百炼 5h / Go 周·月）；不返回即完全不占位
         for wn in u.windows[1:]:
             lab = WIN_LABELS.get(wn.label, wn.label)
-            txt = f"{lab} 窗口 · 已用 " + (f"{wn.pct_used:.1%}" if wn.pct_used is not None
-                                           else "—")
+            txt = f"{lab} · 已用 " + (f"{wn.pct_used:.1%}" if wn.pct_used is not None
+                                       else "—")     # M25：D 行同去「窗口」
             c.create_text(m, P(bottom + 6), anchor="w", font=self.f_tiny,
                           fill=c_soft, text=txt)
             c.create_text(right, P(bottom + 6), anchor="e", font=self.f_tiny,

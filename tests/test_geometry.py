@@ -30,9 +30,13 @@ CFG = {"poll_seconds": 300, "low_yellow_pct": 0.15, "low_red_pct": 0.05,
 
 
 def place(app, wa, x, y, scale=1.0):
-    """伪造工作区 + 伪造 state 坐标 → 调真实 _place_initial 钳制路径。"""
+    """伪造工作区 + 伪造 state 坐标 → 调真实 _place_initial 钳制路径。
+
+    M26：钳位改按 work_areas()（重叠最大区），伪造时两口径同步单区。"""
     ui_mod.work_area = lambda: wa
+    ui_mod.work_areas = lambda: [wa]
     app.S = scale
+    app._dpi_watch = False        # M26：伪造刻度期间关 watch（防 _drain 轮询洗回）
     app.init_state = {"x": x, "y": y, "always_on_top": None}
     app._place_initial()
 
@@ -68,6 +72,7 @@ def run(tmp: Path) -> int:
     config_mod.CONFIG_PATH = tmp / "config.json"
     config_mod.LOCAL_DIR = tmp
     orig_wa = ui_mod.work_area
+    orig_was = ui_mod.work_areas
 
     main_mod.enable_dpi_awareness()
     root = tk.Tk()
@@ -168,6 +173,7 @@ def run(tmp: Path) -> int:
         print("· B2（拔副屏后启动钳回主屏）→ 未验（无双屏），按清单以 B3 伪造坐标钳制替代")
     finally:
         ui_mod.work_area = orig_wa
+        ui_mod.work_areas = orig_was
         try:
             app.quit()
         except Exception:                           # noqa: BLE001

@@ -9,7 +9,8 @@
     python main.py --autostart-dry-run  # 打印将写入的自启注册表值，不写注册表
     python main.py --verbose            # stdout 输出每轮采集摘要（不含凭据）
 
-DPI：在创建 Tk 窗口前用 ctypes 设系统级 DPI awareness，防止位图拉伸发糊。
+DPI：在创建 Tk 窗口前用 ctypes 设进程 awareness（M26 起优先 PER_MONITOR_AWARE_V2，
+失败逐级回退 PM→system→经典 API；全部失败也不崩，行为=改造前）。
 """
 from __future__ import annotations
 
@@ -41,17 +42,35 @@ def protect_std_streams() -> None:
                 setattr(sys, name, _NullWriter())
 
 
-def enable_dpi_awareness() -> None:
-    """PROCESS_SYSTEM_DPI_AWARE(1)；老系统回退 user32.SetProcessDPIAware。"""
+def enable_dpi_awareness() -> str:
+    """M26 PMv2 优先感知链（必须在 Tk() 前调用；返回生效档位供诊断/测试取证）。
+
+    层级：PER_MONITOR_AWARE_V2(ctx=-4, Win10 1703+) → shcore PER_MONITOR(2)
+    → shcore SYSTEM(1) → user32.SetProcessDPIAware（经典 system）→ unaware。
+    每级失败（老系统无该 API / awareness 已被设定）都安静落到下一级或结束，
+    绝不抛异常阻塞启动。重复调用（dev 脚本/测试二次进入）第二次起返回 None 档
+    也说明进程 awareness 已由首调用决定。"""
+    user32 = ctypes.windll.user32
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        return
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return "pmv2"
     except (OSError, AttributeError):
         pass
     try:
-        ctypes.windll.user32.SetProcessDPIAware()
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:   # PER_MONITOR
+            return "pm"
     except (OSError, AttributeError):
         pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:   # SYSTEM
+            return "system"
+    except (OSError, AttributeError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+        return "system-legacy"
+    except (OSError, AttributeError):
+        return "unaware"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.poll:
         cfg["poll_seconds"] = max(POLL_MIN_SECONDS, args.poll)
 
-    enable_dpi_awareness()
+    dpi_mode = enable_dpi_awareness()
+    if args.verbose:
+        print(f"[main] DPI awareness = {dpi_mode}", flush=True)
     import tkinter as tk
     root = tk.Tk()
 

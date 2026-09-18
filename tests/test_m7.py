@@ -130,6 +130,9 @@ def run(tmp: Path) -> int:
             t = "".join(texts(app))
             assert "加油包" in t, "有包须显示细条标签"
             assert "剩 1,508 / 20,000" in t, texts(app)   # M11c③ 细条方向锚「剩」
+            # M25：百炼 B 行去「窗口」——「7d · 已用 x%」拼接 + 全画面零「窗口」
+            assert "7d · 已用 61.2%" in t, t
+            assert "窗口" not in t, f"画面出现「窗口」：{t}"
             assert abs((on_h - base_h) - ROW_ADDON * app.S) <= 2.0, (base_h, on_h)
             # 回到无包：高度精确回落（零占位，不留空行）
             feed(app, u_no_addon())

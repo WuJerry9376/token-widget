@@ -16,7 +16,8 @@ settings 图按裁决「沿用重命名拷贝」（脚本内拷贝 preview_m22_s
   与 Go 三窗高光态一起钉双态矩阵）；券×1；大数字 59%。
 - ↻ 图标 M24A 层序修复后态：rotbg/rot 两 item 恒在全部纸纹线（dash=(1,6)）之上。
 
-判据：三行 kind 全 full；「周窗」全画面不存在；Go/Codex 条行 label 无「窗」字；
+判据：三行 kind 全 full；「周窗」全画面不存在；条行 label 无「窗」字；
+**全画面（含百炼行）零「窗口」（M25 全局裁决；模拟图不重拍，断言保持可跑）**；
 M3c 顶边纯净（strip_above20=0、outside_paper_top=0）+ 四项守护；画面零 ORANGE 像素。
 """
 from __future__ import annotations
@@ -192,16 +193,18 @@ def main_run(tmp: Path) -> int:
         ok &= ("5h · 已用 62.0%" in joined and "日 · 已用 35.0%" in joined
                and "周 · 已用 18.0%" in joined)
         ok &= "周 · 已用 8.0%" in joined and "5h · 已用 41.0%" in joined
-        # 禁字扫描范围=多主条行 label（Go 5h/日/周 + Codex 5h/周；百炼通用行
-        # 「7d 窗口 · 已用」不在 M24B 裁决范围）
+        # 禁字扫描（M25 升级）：条行 label 零「窗」（Go 5h/日/周 + Codex 5h/周）
+        # + **全画面（含百炼行）零「窗口」**——百炼 B 行已改「7d · 已用 x%」拼接
         bar_labels = [t for t in ts if "· 已用" in t
-                      and t.startswith(("5h ", "日 ", "周 "))]
-        ok &= ("周窗" not in joined and len(bar_labels) == 5
+                      and t.startswith(("5h ", "日 ", "周 ", "7d "))]
+        ok &= ("周窗" not in joined and len(bar_labels) == 6
                and all("窗" not in t for t in bar_labels))
         # M24C：Go 窗口标签去波浪号——全画面无 "~5h"、条行 label 零 "~" 字符
         ok &= "~5h" not in joined and all("~" not in t for t in bar_labels)
+        # M25：全画面零「窗口」（canvas 文本项，含百炼 B 行与券 tooltip 不进画面）
+        ok &= "窗口" not in joined
         if not ok:
-            print("B 禁字失败:", bar_labels, "~5h" in joined, flush=True)
+            print("B 禁字失败:", bar_labels, "~5h" in joined, "窗口" in joined, flush=True)
         ok &= "券×1" in joined and not any(w in joined for w in FORBIDDEN)
         ok &= app._upd_new is None and not app.fetching
         ok &= 27360 + 8412 == 35772

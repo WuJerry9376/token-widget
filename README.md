@@ -117,8 +117,8 @@ python cli.py                     # console view of the same collected data
 | 供应商 | 显示 | 数据源 | 备注 |
 |---|---|---|---|
 | 百炼个人版 | 7 天周期剩余 Credits + 重置倒计时；有 5h 数据时自动副显；加油包单列；分项行尾附「套餐 MM-DD 到期」（subscription.endTime；≤7 天转橙、≤3 天转红，跨年带年份；Go/Codex 无此字段永不显示） | 控制台网关（非官方契约，移植 CodexBar/OmniRoute 实测逻辑，见 `docs\bailian_gateway_spec.md`） | Cookie 过期会提示重贴；完整到期日+剩余天数在 tooltip |
-| OpenCode Go | 5h/周/月窗口已用 % + 倒计时 | `zen/go/v1/usage`（Go key，`~/.local/share/opencode/auth.json` 的 `opencode-go` 条目） | 无绝对额度下发 |
-| Codex（实验性） | 5h/周窗口已用 % + 重置倒计时；积分/重置券进 tooltip | ChatGPT 订阅 OAuth（见 A3） | 非官方接口，可能随时失效 |
+| OpenCode Go | 5h/周/月已用 % + 倒计时（M25：UI 文案去「窗口」字样） | `zen/go/v1/usage`（Go key，`~/.local/share/opencode/auth.json` 的 `opencode-go` 条目） | 无绝对额度下发 |
+| Codex（实验性） | 5h/周已用 % + 重置倒计时；积分/重置券进 tooltip | ChatGPT 订阅 OAuth（见 A3） | 非官方接口，可能随时失效 |
 
 ### A3 如何绑定 OpenCode Go（M6 起"占位"已转真实；M11a 起本页不再含 OpenAI）
 
@@ -129,7 +129,7 @@ python cli.py                     # console view of the same collected data
 
 ### A4 Codex / ChatGPT Plan 窗口限额（M10，**实验性**）
 
-- 第 4 家供应商「Codex（实验性）」：显示 ChatGPT 订阅的 Codex **5h / 周 窗口已用 % + 重置倒计时**（plan_type 做徽章；Pro 积分余额、窗口重置券计数进 tooltip）。
+- 第 4 家供应商「Codex（实验性）」：显示 ChatGPT 订阅的 Codex **5h / 周 已用 % + 重置倒计时**（plan_type 做徽章；Pro 积分余额、窗口重置券计数进 tooltip）。
 - ⚠️ 实验性声明：走 **非官方前端接口**（`chatgpt.com/backend-api/codex/usage`），ToS 灰区、仅只读低频（≥60s），**可能随时失效**；默认不启用，设置页手动勾选。
 - token 自动读取（M10b，按序取第一个合格命中，仅 `auth_mode=chatgpt`）：① `local\auth.json`（frozen=exe 同级）→ ② 项目根 / exe 同级 `auth.json` → ③ `~\.codex\auth.json`（Codex CLI 登录产物）；面板显示"已自动检测：<来源路径>（尾 4 位）"。
 - 异机/无 CLI 登录：设置页手动粘贴 access_token（DPAPI 加密存储）；token 任何时刻不回显、不进日志，与 OpenAI 平台 key 完全不互通。
