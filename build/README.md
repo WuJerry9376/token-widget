@@ -123,6 +123,19 @@ else:
 > tests\test_settings.py:182 看门断言漂移即红（静态 pin 已于 168 改为 X.Y.Z 格式
 > 校验，防漂移职责归看门）。**
 
+- **2026-09-19 v1.8.3 换装（打包线：M23 百炼套餐到期提示 + M24 层序统一/Go 三主条
+  (5h/日/周)/高光绝对阈/去窗字 + M24C 波浪号清除，三里程碑一并入库）**：三里程碑
+  commit `5847531`（15 文件，含 capture_m22/m24 入库）；双源升版 1.8.3（看门 PASS）；
+  门禁 10 套 **177/177**（169+M23 3+M24/M24C 5）；重建 **10.8 MB / 17.8s**，PE 通过，
+  属性 1.8.3。**frozen 冒烟（windowed 交付形态）**：`--open-settings` 探针定位设置面板
+  +主浮窗——设置 foot FAINT 墨=242（官方图标回归）、非纸占比 0.072，主窗底部错误档行
+  文字渲染 0.2413、`--quit-after 25` 干净自退 exit=0，存证 `local\m24_frozen_foot.png`；
+  ⚠️ 说明：套餐后缀/Go 三主条属**数据态渲染**，frozen 假凭据只产生错误档不可注入——
+  由同代码路径 dev 证据覆盖（capture_m24 已用户验收 + 门禁 m7/m6_go/m10 断言）。
+  探针顺证空 dist 自愈（build 清 dist 后首跑 NO_CREDENTIAL 文案正常不崩）。注册表
+  **IDENTICAL**；**MpCmdRun 0 检出**；无孤儿双进程 responding；守卫四件复布哈希一致
+  （enabled=[bailian,codex] 维持项目现状，Go 未勾选属用户态不强改）。README A6 版本
+  近况→v1.8.3。收口：commit + tag v1.8.3 + push + `gh release create v1.8.3`。
 - **2026-09-19 v1.8.2 换装（M21+M20 门面波次 / 打包线：foot 图标官方 Invertocat 资产化 +
   README 双语门面文案修订）**：M21 素材轮 commit `68323ea`（assets×8 烘焙 PNG、
   tools/make_gh_assets.py、spec datas、u26 改造+自绘禁回流，14 文件）；双源升版 1.8.2
