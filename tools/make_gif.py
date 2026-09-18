@@ -75,8 +75,10 @@ TOTAL_BYTES = 11263948                     # 示例包大小 10.7 MB
 
 
 def u_bailian() -> Usage:
-    """v1.8.3 口径：7d=40,000 已用 31.6%（剩 27,360）＋加油包 8,412/20,000 →
-    大数字 35,772=Σfloor；C 行尾带 M23 套餐后缀（+23 天 → 恒灰档，重跑不变色）。"""
+    """v1.9.0 口径：7d=40,000 已用 31.6%（剩 27,360）＋加油包 8,412/20,000 →
+    大数字 35,772=Σfloor；C 行尾带 M23 套餐后缀。**plan_end 取绝对日期 2026-12-31**
+    （M27 选型：固定文案「 · 套餐 12-31 到期」零漂移；2026 内恒 >7 天灰档，
+    2027 起自动转跨年全日期显示，届时随素材例行刷新改期）。"""
     weekly, pct, ar = 40000.0, 0.316, 8412.0
     return Usage(provider="bailian", ok=True, spec="pro", unit="credits",
                  used=weekly * pct, total=60000.0,
@@ -84,7 +86,7 @@ def u_bailian() -> Usage:
                  resets_at=_NOW + timedelta(hours=52, minutes=12),
                  windows=[Window("7d", pct, _NOW + timedelta(hours=52, minutes=12))],
                  addon_remaining=ar,
-                 plan_end=_NOW + timedelta(days=23, hours=9))
+                 plan_end=datetime(2026, 12, 31, 4, tzinfo=timezone.utc))
 
 
 def u_go() -> Usage:
@@ -108,9 +110,10 @@ def u_codex() -> Usage:
 
 
 def make_info() -> updater.UpdateInfo:
-    return updater.UpdateInfo(version="1.9.0", url="https://github.com/fake/repo/x.exe",
+    # 演示目标版本 v2.0.0（M27：须 ≠ 当前 APP_VERSION，避免弹窗自环「v1.9.0→v1.9.0」）
+    return updater.UpdateInfo(version="2.0.0", url="https://github.com/fake/repo/x.exe",
                               notes=NOTES_GIF, digest=None, size=TOTAL_BYTES,
-                              published="2026-09-19T08:12:34Z")
+                              published="2026-12-19T08:12:34Z")
 
 
 def pump(widgets, ms: float) -> None:
