@@ -315,6 +315,114 @@ def a11_subscription_endtime_to_plan_end(app, checks):
     assert app._row_infos()[0]["kind"] in ("err", "full")
 
 
+# ---------------- 月口径自适应（2026-09-23 实测 payload，规格 §7 补记） ----------------
+
+# 实测 quota-config（临期改月度额度口径：档位键 weekly → monthly，新增 essential 档）
+QUOTA_MEASURED = {"standard": {"five_hour": 3000.0, "monthly": 45000.0},
+                  "addon_quota": {"extrabundle": 20000.0},
+                  "lite": {"five_hour": 700.0, "monthly": 11500.0},
+                  "pro": {"five_hour": 12000.0, "monthly": 180000.0},
+                  "essential": {"five_hour": 1800.0, "monthly": 25500.0}}
+MONTH_RESET_MS = 1790524800000   # per1MonthResetTime 实测值（= subscription.endTime）
+
+
+def _posts(sub_env, quota_env, usage_env, addon_env):
+    return {"subscription": {"http": 200, "api": "subscription", "env": env_ok(sub_env)},
+            "quota-config": {"http": 200, "api": "quota-config", "env": env_ok(quota_env)},
+            "usage": {"http": 200, "api": "usage", "env": env_ok(usage_env)},
+            "list": {"http": 200, "api": "addon/list", "env": env_ok(addon_env)}}
+
+
+def b1_month_only_main_window(app, checks):
+    """仅月口径（实测 pro 临期 payload）→ 主窗=月、remaining=monthly×(1−pct)+addon。"""
+    posts = _posts({"specCode": "pro", "endTime": MONTH_RESET_MS}, QUOTA_MEASURED,
+                   {"per1MonthPercentage": 0.0006086339444444444,
+                    "per1MonthResetTime": MONTH_RESET_MS},
+                   {"items": [{"remainingCredits": 2000.0, "totalCredits": 20000.0}]})
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+    finally:
+        undo()
+    assert u.ok, (u.error_code, u.error_msg)
+    pct = 0.0006086339444444444
+    assert u.windows[0].label == "月" and u.windows[0].pct_used == pct, u.windows
+    assert len(u.windows) == 1, "无 per5HourPercentage → 不出 5h 窗（零占位）"
+    assert u.total == 180000.0 + 20000.0 and u.used == 180000.0 * pct
+    assert u.remaining == 180000.0 * (1 - pct) + 2000.0
+    assert u.pct_used == pct and abs(u.resets_at.timestamp() * 1000 - MONTH_RESET_MS) < 1000, \
+        "月 reset（ms epoch）解析"
+    assert "fake_cookie" not in repr((u.used, u.total, u.remaining, u.windows, u.resets_at))
+    # 通用渲染支路：label "月" 原样输出、无凭据泄漏
+    reset(app)
+    feed(app, u)
+    labels = texts_join(app)
+    assert "月 · 已用" in labels, labels
+    assert "fake_cookie" not in labels and "login_aliyunid_csrf" not in labels
+
+
+def b2_week_month_coexist_prefers_week(app, checks):
+    """周+月共存 → 按周（旧口径回归：label 7d、quota 取 weekly），5h 存在照常 append。"""
+    posts = _posts({"specCode": "pro"}, QUOTA_MEASURED | {"pro": {"weekly": 40000.0,
+                                                                  "monthly": 180000.0}},
+                   {"per1WeekPercentage": 61.2, "per1WeekResetTime": MONTH_RESET_MS,
+                    "per1MonthPercentage": 0.5, "per1MonthResetTime": MONTH_RESET_MS,
+                    "per5HourPercentage": 30.0},
+                   {"items": []})
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+    finally:
+        undo()
+    assert u.ok, (u.error_code, u.error_msg)
+    assert [w.label for w in u.windows] == ["7d", "5h"], u.windows
+    assert u.total == 40000.0 and u.pct_used == 0.612
+
+
+def b3_neither_week_nor_month_parse_empty(app, checks):
+    """周/月皆无（仅 5h，非空窗口）→ PARSE_EMPTY，msg 如实列缺失字段、不含 Cookie。"""
+    posts = _posts({"specCode": "pro"}, QUOTA_MEASURED,
+                   {"per5HourPercentage": 0.5}, {"items": []})
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+    finally:
+        undo()
+    assert u.ok is False and u.error_code == "PARSE_EMPTY", (u.error_code, u.error_msg)
+    assert "per1WeekPercentage" in u.error_msg and "per1MonthPercentage" in u.error_msg
+    assert "fake_cookie" not in u.error_msg and "login_aliyunid_csrf" not in u.error_msg
+    reset(app)
+    feed(app, u)
+    assert app._row_infos()[0]["kind"] in ("err", "full")
+
+
+def b4_caliber_mismatch_parse_empty(app, checks):
+    """口径错配：tier 只有 monthly、usage 只有周 → 按主窗口径取不到 quota → PARSE_EMPTY。"""
+    posts = _posts({"specCode": "pro"}, {"pro": {"five_hour": 12000.0, "monthly": 180000.0}},
+                   {"per1WeekPercentage": 0.5, "per1WeekResetTime": MONTH_RESET_MS},
+                   {"items": []})
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+    finally:
+        undo()
+    assert u.ok is False and u.error_code == "PARSE_EMPTY", (u.error_code, u.error_msg)
+    assert "weekly=None" in u.error_msg, u.error_msg
+    assert "fake_cookie" not in u.error_msg
+
+
+def b5_tier_defensive_non_numeric(app, checks):
+    """tier 值非数值（字符串/嵌套 dict）→ _pick_num 防御为 None → PARSE_EMPTY 不崩。"""
+    posts = _posts({"specCode": "pro"}, {"pro": {"monthly": "180000"}},
+                   {"per1MonthPercentage": 0.5}, {"items": []})
+    undo, _c = _stub_gateway_api(app, posts, [])
+    try:
+        u = BailianSource().fetch()
+    finally:
+        undo()
+    assert u.ok is False and u.error_code == "PARSE_EMPTY", (u.error_code, u.error_msg)
+
+
 def a7_all_providers_error(app, checks):
     # M11a：合成 provider 样本由 openai 换 opencode_go（OpenAI 行已退场）
     reset(app)
@@ -526,6 +634,11 @@ CASES = [("A1", a1_login_expired_with_history), ("A2", a2_login_expired_no_histo
          ("A7", a7_all_providers_error), ("A8", a8_cookie_panel_rejects_no_equals),
          ("A9", a9_poll_race), ("A10", a10_http_semantics),
          ("A11-plan_end", a11_subscription_endtime_to_plan_end),
+         ("B1-month-only", b1_month_only_main_window),
+         ("B2-week+month", b2_week_month_coexist_prefers_week),
+         ("B3-no-week-month", b3_neither_week_nor_month_parse_empty),
+         ("B4-caliber-mismatch", b4_caliber_mismatch_parse_empty),
+         ("B5-tier-non-numeric", b5_tier_defensive_non_numeric),
          ("T-kick", t11_kick_wakes_immediately),
          ("T-kick-idempotent", t12_kick_coalesced_no_storm)]
 

@@ -1,7 +1,12 @@
 """百炼个人版 source（PLAN.md §2.1 / docs/bailian_gateway_spec.md）。
 
 顺序：subscription → quota-config → usage → addon（addon 失败容错，不影响整体 ok）。
-剩余公式：weekly × (1 − per1WeekPercentage) + Σ addon.remainingCredits。
+主窗口口径自适应（规格 §7，2026-09-23 实测：订阅临期时网关不下发 per1Week*，仅回
+per1Month* 月度剩余额度）：**周优先、月兜底**——有 per1WeekPercentage → 主窗=周
+（quota 取 tier.weekly，label "7d"，旧行为）；无周仅有 per1MonthPercentage → 主窗=月
+（quota 取 tier.monthly，label "月"，reset 用 per1MonthResetTime）；两者皆无 →
+PARSE_EMPTY。
+剩余公式：主窗 quota × (1 − 主窗百分比) + Σ addon.remainingCredits。
 5h 字段缺省时不出 5h 窗口（PLAN §7-Q5）。
 凭据只经 auth.load_bailian_cookie()；错误 msg 不含 Cookie 值。
 """
@@ -36,6 +41,17 @@ def _norm_pct(v) -> float | None:
     if not isinstance(v, (int, float)):
         return None
     return v / 100 if v > 1 else v
+
+
+def _pick_num(d, *keys) -> float | None:
+    """dict 按序取首个数值键（防御非 dict/非数值/bool；规格 §7 tier 混合形态）。"""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return v
+    return None
 
 
 def _addon_items(payload) -> list[dict]:
@@ -100,7 +116,6 @@ class BailianSource(ProviderSource):
             return self._usage_error(err, r_q)
         p_q = r_q.get("payload") or {}
         tier = p_q.get(str(spec), {}) if spec else {}
-        weekly = tier.get("weekly") if isinstance(tier, dict) else None
 
         # 3) usage（窗口百分比；空窗口 3×400ms 重试在 gw.call_api 内）
         r_u = self._call(cookie, f"{gw.API_PREFIX}/usage", is_usage=True)
@@ -111,8 +126,22 @@ class BailianSource(ProviderSource):
         p_u = r_u.get("payload") or {}
         wk_pct = _norm_pct(p_u.get("per1WeekPercentage"))
         wk_reset = _ms_to_dt(p_u.get("per1WeekResetTime"))
+        mo_pct = _norm_pct(p_u.get("per1MonthPercentage"))
+        mo_reset = _ms_to_dt(p_u.get("per1MonthResetTime"))
         h5_pct = _norm_pct(p_u.get("per5HourPercentage"))
         h5_reset = _ms_to_dt(p_u.get("per5HourResetTime"))
+
+        # 主窗口口径选择：周优先、月兜底（两者都有按周=旧口径；都无 → PARSE_EMPTY）
+        if p_u.get("per1WeekPercentage") is not None:
+            q_keys, pct_key = ("weekly",), "per1WeekPercentage"
+            main_label, main_pct, main_reset = "7d", wk_pct, wk_reset
+        elif p_u.get("per1MonthPercentage") is not None:
+            q_keys, pct_key = ("monthly",), "per1MonthPercentage"
+            main_label, main_pct, main_reset = "月", mo_pct, mo_reset
+        else:
+            return _fail(self.name, "PARSE_EMPTY",
+                         "关键字段缺失：per1WeekPercentage/per1MonthPercentage 均无"
+                         f"（usage payload 键：{sorted(p_u) or '空'}）")
 
         # 4) addon（用量包；国内站路径未证实 → 失败容错，不影响整体 ok）
         addon_remaining = addon_total = 0.0
@@ -131,23 +160,26 @@ class BailianSource(ProviderSource):
         except gw.LoginExpired:
             pass  # 容错：addon 失败不升级为整体失败（也不误导为重贴 Cookie）
 
-        if not isinstance(weekly, (int, float)) or wk_pct is None:
+        # quota 按主窗口口径取键（tier 可能缺失/非 dict/非数值 → None 走失败语义）
+        quota = _pick_num(tier, *q_keys)
+        if not isinstance(quota, (int, float)) or main_pct is None:
             return _fail(self.name, "PARSE_EMPTY",
-                         f"关键字段缺失：weekly={weekly!r} per1WeekPercentage={p_u.get('per1WeekPercentage')!r}")
+                         f"关键字段缺失：{q_keys[0]}={quota!r} "
+                         f"{pct_key}={p_u.get(pct_key)!r}")
 
-        # 剩余公式（规格 §7）：weekly×(1−pct) + Σaddon.remainingCredits
-        weekly_left = weekly * (1 - wk_pct)
-        remaining = weekly_left + (addon_remaining if addon_ok else 0)
-        total = weekly + (addon_total if addon_ok else 0)
+        # 剩余公式（规格 §7）：主窗 quota×(1−pct) + Σaddon.remainingCredits
+        main_left = quota * (1 - main_pct)
+        remaining = main_left + (addon_remaining if addon_ok else 0)
+        total = quota + (addon_total if addon_ok else 0)
 
-        windows = [Window(label="7d", pct_used=wk_pct, resets_at=wk_reset)]
+        windows = [Window(label=main_label, pct_used=main_pct, resets_at=main_reset)]
         if h5_pct is not None:  # 5h 缺省时不出窗口（曾被临时下线）
             windows.append(Window(label="5h", pct_used=h5_pct, resets_at=h5_reset))
 
         return Usage(
             provider=self.name, ok=True, spec=spec, unit="credits",
-            used=weekly * wk_pct, total=total, remaining=remaining,
-            pct_used=wk_pct, resets_at=wk_reset, windows=windows,
+            used=quota * main_pct, total=total, remaining=remaining,
+            pct_used=main_pct, resets_at=main_reset, windows=windows,
             addon_remaining=addon_remaining if addon_ok else None,
             plan_end=plan_end,
         )
