@@ -94,8 +94,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="pending_swap.json 路径覆盖（默认 local/update/；提权链落 TEMP 时显式传入）")
     args = ap.parse_args(argv)
 
-    # M28 换装序列（必须早于任何窗口/文件锁建立）：marker 驱动、无 marker 零副作用。
-    # 改名自身（.new→正名）在 Windows 合法、进程续跑；失败写 FAILED.txt 照常运行。
+    # M28/M28b 换装序列（必须早于任何窗口/文件锁建立）：marker 驱动、无 marker 零副作用。
+    # copy+接力语义（M28b）：就位正名绝不改名自身映像（onefile 检测即退），frozen 成功
+    # 路径经 staged 进程交棒退出（"handed"）；接力失败写 FAILED.txt 照常续跑不 brick。
     try:
         from src import updater as _updater
         _sw = _updater.run_pending_swap(marker_override=args.start_marker)

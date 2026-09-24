@@ -7,4 +7,4 @@ settings_render 用例做机器看门（断言 APP_VERSION 必出现在
 version_info.txt 中），漏同步即门禁红。
 """
 
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.9.3"

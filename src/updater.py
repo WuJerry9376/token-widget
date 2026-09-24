@@ -561,20 +561,32 @@ def _writable_dir(base: Path) -> bool:
         return False
 
 
-# ---------------- M28：去 cmd 化重启链（marker 驱动，新实例自我替换，零可见窗口） ----------------
+# ---------------- M28/M28b：去 cmd 化重启链（marker 驱动，零可见窗口） ----------------
 #
 # 旧链（≤v1.9.0）病灶：os.spawnv(P_DETACH, cmd /c restart_update.cmd) 的分离态父链
 # 令 Windows「Security validation failure: failed to obtain executable path for
 # parent process」校验在 cmd 内 start 步骤查询父 exe 路径失败 → 弹窗且新实例不被
-# 拉起（改名/搬运在弹窗前已完成，替换本身成功）。新链：下载校验完成后写 marker →
-# 直接 Popen **staged 新 exe 本体**（DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP，
-# 不经任何 shell）带 --post-update-swap --start-marker <path> → 旧实例退出；
-# 新实例启动早期执行改名序列（old→.old 占用重试 → **改名自身 .new→正名**（Windows
-# 允许改运行中 exe 映像文件名，进程继续跑）→ 删 marker → 以正身运行）。
+# 拉起。新链：下载校验完成后写 marker → 直接 Popen **staged 新 exe 本体**
+# （DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP，不经任何 shell）带 --post-update-swap
+# --start-marker <path> → 旧实例退出。
+# ⚠️ M28b 铁律（v1.9.2 事故修复，禁回流）：**staged 实例绝不改名/移动自身映像**。
+# M28 原「改名自身 .new→正名」在 Windows 层合法，但 PyInstaller onefile bootloader
+# 检测到自身 exe 路径失效即报 "appears to have been moved or deleted… Exiting now"
+# （换装后 ~1.7s 进程死亡；文件层全对但接力断头，2026-09-24 目标机+沙箱双复现，
+# dev E2E 六判据只查文件态未查进程存活故漏检）。新语义=**copy+接力+确认退出**：
+# old→.old 占用重试改名（不动自己，安全）→ **copyfile(new→tmp)+os.replace(tmp,old)**
+# （同卷原子就位正名，不触碰自身映像，copy 半成品由 tmp+原子 replace 消除）→ 删
+# marker → **spawn 正名 exe**（DETACHED 同款、零附加参数、cwd=exe 目录）→ 轮询确认
+# 存活 ~3s（早死重拉一次，再死判败）→ 确认存活则本 staged 进程 os._exit(0) 交棒
+# （返回值 "handed"）；spawn 败/两次早死 → 写 FAILED.txt(launch_failed)、本进程
+# **照常以 staged 位置续跑保窗**（兜底不 brick）。附带收益：存活体永远是正名 exe
+# 起的干净进程，sys.executable/frozen LOCAL_DIR/凭据目录归位，staged 语境
+# <deploy>\local\update\local 错位消失。
 # 失败路径：写 FAILED.txt（面板既有消费链）→ 照常运行 staged 位置不 brick。
 # 双向兼容硬要求：无 marker 时 run_pending_swap 零副作用（老用户正常启动不受影响）；
 # marker 过期(>10min)视为陈旧自清——唯一例外当前进程即 marker.new（请求是给"我"的，
-# 过期也执行，否则更新链断头）。
+# 过期也执行，否则更新链断头）。接收端修复天然自部署：1.9.1/1.9.2 旧客户端的
+# apply 侧（写 marker/Popen/退出）不变，即可正确驱动本新逻辑。
 
 def marker_dir_and_path(base: Path | None = None) -> tuple[Path, Path]:
     """(marker 目录, marker 路径)。默认 update_dir()；提权路径可指 TEMP 可写处。"""
@@ -645,59 +657,109 @@ def _rename_retry(src: Path, dst: Path, tries: int = 10, delay: float = 0.5,
 def _image_holder_alive(exe_path: Path) -> bool:
     """是否有存活进程仍持 exe_path 映像（改名后的 .old 归属判据）。
 
-    仅 CreateToolhelp32Snapshot 快照（TH32CS_SNAPMODULE32|SNAPMODULE），零提权、
-    对 64 位同构进程足够；任何不可读（权限/架构差）→ 保守 False=孤儿判。
-    """
+    M28b 实测改道：CreateToolhelp32Snapshot 在本机 Win11 两条路都不可用——
+    PROCESS32 枚举报 ERROR_BAD_LENGTH(24)，MODULE32+pid=0 只回**调用者自身模块**
+    （永远看不见别的进程的 .old 归属，语义即错）。改用 EnumProcesses +
+    QueryFullProcessImageNameW：NTFS 对改名后的运行映像跟随返回**当前路径**，
+    与目标全路径大小写不敏感精确比对。零提权；不可读进程（权限/架构差）跳过，
+    全无可读命中 → 保守 False=孤儿判。"""
     import ctypes
     from ctypes import wintypes
-    name = exe_path.name.lower()
-
-    class ME32W(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-                    ("glbcntUsage", ctypes.c_void_p), ("modcntUsage", wintypes.DWORD),
-                    ("hModule", wintypes.HINSTANCE),
-                    ("modBaseAddr", ctypes.c_void_p), ("modSize", ctypes.c_size_t),
-                    ("szModule", ctypes.c_wchar * 256),
-                    ("szExePath", ctypes.c_wchar * 260)]
+    target = str(exe_path).lower().rstrip("\\/")
 
     k32 = ctypes.windll.kernel32
-    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snap = k32.CreateToolhelp32Snapshot(0x18, 0)      # MODULE32|MODULE
-    if snap == -1:
-        return False
-    me = ME32W()
-    me.dwSize = ctypes.sizeof(ME32W)
-    alive = False
+    k32.OpenProcess.restype = wintypes.HANDLE
     try:
-        ok = k32.Module32FirstW(snap, ctypes.byref(me))
-        while ok:
-            try:
-                if me.szExePath.lower().endswith("\\" + name):
-                    alive = True
-                    break
-            except ValueError:
-                pass
-            ok = k32.Module32NextW(snap, ctypes.byref(me))
-    finally:
-        k32.CloseHandle(snap)
-    return alive
+        enum_fn = k32.K32EnumProcesses                 # kernel32 导出名（Win7+）
+    except AttributeError:
+        enum_fn = ctypes.windll.psapi.EnumProcesses    # 老导出兜底
+    pids, needed = None, wintypes.DWORD(0)
+    for cap in (4096, 16384):                       # 满员则扩容重试一次
+        pids = (wintypes.DWORD * cap)()
+        if not enum_fn(ctypes.byref(pids), ctypes.sizeof(pids),
+                       ctypes.byref(needed)):
+            return False
+        if needed.value < ctypes.sizeof(pids):
+            break
+    for i in range(min(needed.value // 4, len(pids))):
+        pid = pids[i]
+        if not pid:
+            continue
+        h = k32.OpenProcess(0x1000, False, pid)     # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            continue
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)) and \
+                    buf.value.lower().rstrip("\\/") == target:
+                return True
+        except OSError:
+            pass
+        finally:
+            k32.CloseHandle(h)
+    return False
+
+
+def _copy_into_place(src: Path, dst: Path) -> None:
+    """copyfile→同目录 tmp→os.replace 原子就位。**绝不 os.replace(src 自身)**——
+    src 可能就是运行中的自己（onefile bootloader 检测到映像路径失效即退，M28b 铁律）。
+    失败清理 tmp 后原样抛出。"""
+    import shutil
+    tmp = dst.with_name(dst.name + ".swapnew")
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _relay_alive(proc, sleeper, seconds: float = 3.0, step: float = 0.25) -> bool:
+    """接力存活确认：seconds 内轮询 proc.poll()；任一时刻拿到返回码=早死。
+    注入桩无 poll() → 保守视为存活。"""
+    n = max(1, int(seconds / step))
+    for _ in range(n):
+        try:
+            rc = proc.poll()
+        except AttributeError:
+            return True
+        except Exception:                               # noqa: BLE001 判不了=按死
+            return False
+        if rc is not None:
+            return False
+        sleeper(step)
+    try:
+        return proc.poll() is None
+    except Exception:                                   # noqa: BLE001
+        return False
 
 
 def run_pending_swap(current_exe: Path | str | None = None,
                      marker_override: Path | str | None = None,
-                     now: float | None = None, sleeper=None) -> str:
+                     now: float | None = None, sleeper=None,
+                     spawn=None, exit_fn=None, frozen=None) -> str:
     """新实例启动早期调用：有 marker 才动作，无 marker 零副作用（双向兼容硬要求）。
 
-    序列：先处理**仍占用正名的历史 .old**（旧实例仍持映像=刚完成的换装竞态——
-    仅清 marker 收尾绝不搬回；真孤儿=崩溃残留——搬回正名自修复，防 staged 起不来）
-    → old→old.old（占用重试 10×500ms）→ new→正名
-    （os.replace 同卷原子；new 可能就是**当前运行的自己**——Windows 允许改运行中
-    exe 的文件名，进程续跑）→ 删 marker → 清历史 .old（只留最新 1）。
+    序列（M28b copy+接力语义，见区块头铁律）：先处理**仍占用正名的历史 .old**
+    （旧实例仍持映像=刚完成的换装竞态——仅清 marker 收尾绝不搬回；真孤儿=崩溃
+    残留——搬回正名自修复，防 staged 起不来）→ old→old.old（占用重试 10×500ms）
+    → **copy(new→tmp)+原子 replace 就位正名**（不触碰自身映像）→ 删 marker →
+    frozen 语境**接力 spawn 正名 exe**（DETACHED 同款零参数）+ ~3s 存活确认
+    （早死重拉一次）→ 确认则 exit_fn(0) 交棒；失败写 FAILED(launch_failed)、
+    staged 续跑保窗。非 frozen（dev/测试）跳过 spawn/exit，直接 "swapped"。
     失败：写 FAILED.txt（既有消费链）→ 删 marker（防重启循环）→ 返回 "failed"，
-    调用方照常以 staged 位置运行（不 brick）。
+    调用方照常以 staged 位置运行（不 brick；正名若已就位则下次启动即新版）。
     marker 过期(>MARKER_TTL_SECONDS)：默认视为陈旧自清不执行；**例外**——本进程
     即 marker.new（flag 拉起但消费前崩过一次等），过期也执行。
-    返回 ""=无事可做 / "swapped"=已就位 / "failed"=见 FAILED.txt。
+    返回 ""=无事可做 / "swapped"=已就位（dev 语义，进程续跑）/
+    "handed"=已交棒正名进程（frozen 成功路径，实际经 exit_fn 退出不返回）/
+    "failed"=见 FAILED.txt。
+    注入点：spawn（Popen 替身，收 argv list+cwd/creationflags/close_fds）、
+    exit_fn（退出替身）、frozen（默认 sys.frozen，测试可强制 True 走接力支路）。
     """
     cur = Path(current_exe) if current_exe is not None else Path(sys.executable)
     mp = Path(marker_override) if marker_override is not None else marker_dir_and_path()[1]
@@ -744,16 +806,28 @@ def run_pending_swap(current_exe: Path | str | None = None,
             return "swapped"
         return ""
     fail_path = mp.parent / FAILED_NAME
+    sleepf = sleeper if sleeper is not None else (lambda s: time.sleep(s))
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else bool(frozen)
+    renamed = False
     try:
         _prune_old_files(old.parent, keep=0)              # 历史 .old 全清，腾名位给本轮
-        _rename_retry(old, side, sleeper=sleeper)
-        os.replace(new, old)                              # .new→正名（可改名自己）
+        _rename_retry(old, side, sleeper=sleepf)
+        renamed = True
+        _copy_into_place(new, old)                        # copy+原子就位（不动自身）
         try:
             mp.unlink()
         except OSError:
             pass
-        return "swapped"
+        if not is_frozen:
+            return "swapped"                              # dev/测试语境：无接力可验
+        return _handover(old, fail_path, sleepf,
+                        spawn=spawn, exit_fn=exit_fn)
     except (OSError, ValueError) as e:
+        if renamed and not old.exists():                  # 正名缺位补救：搬回 .old
+            try:
+                os.rename(side, old)
+            except OSError:
+                pass                                      # 尽力而为，失败仅记录实况
         try:
             fail_path.write_text(
                 f"swap_failed: {str(e)[:120]} old={old.name} new={new.name}",
@@ -765,6 +839,33 @@ def run_pending_swap(current_exe: Path | str | None = None,
         except OSError:
             pass
         return "failed"
+
+
+def _handover(old: Path, fail_path: Path, sleepf, spawn=None, exit_fn=None) -> str:
+    """frozen 接力：spawn 正名 exe（零链参数）→ 存活确认（早死重拉一次）→
+    确认=exit_fn(0) 交棒返回 "handed"；两试皆败=写 FAILED(launch_failed)、
+    本 staged 进程照常续跑（保窗兜底）返回 "failed"。"""
+    import subprocess
+    spawnf = spawn if spawn is not None else subprocess.Popen
+    last_err = ""
+    for _attempt in (0, 1):
+        try:
+            proc = spawnf([str(old)], cwd=str(old.parent),
+                          creationflags=SWAP_DETACH_FLAGS, close_fds=True)
+        except OSError as e:
+            last_err = f"spawn: {str(e)[:80]}"
+            continue
+        if _relay_alive(proc, sleepf):
+            (exit_fn or os._exit)(0)
+            return "handed"
+        last_err = "early_exit"
+    try:
+        fail_path.write_text(
+            f"swap_failed: launch_failed({last_err}) target={old.name}",
+            encoding="gbk", errors="replace")
+    except OSError:
+        pass
+    return "failed"
 
 
 def _shell_runas(exe: Path, args: list[str]) -> int:

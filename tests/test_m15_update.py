@@ -27,6 +27,9 @@ marker JSON、失败清 marker）；**u16_swap_seq** run_pending_swap 九态（�
 零副作用/坏 marker/过期陈旧/self 救援/FAILED 回退/.old 清理/重复消费/重试节奏）；
 u19 重写 runas 直提权（参数含 marker 路径透传、1223 取消码、双不可写指路）；
 u23 FAILED 样本换 swap_failed 文案。
+M28b 增补（v1.9.2 事故修）：u16 ①改断言为 **copy+原子就位**（改名自身禁回流，
+staged .new 留位）；u32~u36 接力五态（handed 交棒/早死重拉/双败 launch_failed
+不退出不 brick/spawn 异常归 launch_failed/copy 败回滚正名+marker 清）。
 """
 from __future__ import annotations
 
@@ -417,10 +420,10 @@ def u15_apply_flow() -> str:
 
 
 def u16_swap_seq() -> str:
-    """M28：run_pending_swap 八态矩阵——改名自身（Windows 运行中改映像名合法，
-    tmp 文件系统层等价验证 + frozen E2E 实机核验见收口报告）/无 marker 零副作用/
-    坏 marker/过期陈旧/**过期但 self=请求主体仍执行**/失败 FAILED 回退/陈旧 .old
-    清理/重复消费防御。"""
+    """M28b（改造非删）：run_pending_swap 九态矩阵——**copy+原子就位**（M28 的
+    改名自身已禁：onefile bootloader 检测自身映像路径失效即退，v1.9.2 事故；
+    copy 语义下 staged .new 留位不删）/无 marker 零副作用/坏 marker/过期陈旧/
+    **过期但 self=请求主体仍执行**/失败 FAILED 回退/陈旧 .old 清理/重复消费/重试节奏。"""
     base = tmp_root / "swap"
     base.mkdir(exist_ok=True)
     old = base / "TokenWidget.exe"
@@ -434,12 +437,14 @@ def u16_swap_seq() -> str:
         old.write_bytes(b"OLD")
         newf.write_bytes(b"NEW")
 
-    # ① 正常换装（cur=self=.new 改名自身路径）
+    # ① 正常换装（非 frozen=dev 语义：copy+原子就位，无接力；.new 留位）
     reset()
     up.write_marker(old, newf, base=base)
     assert up.run_pending_swap(current_exe=newf, marker_override=mp,
                                sleeper=lambda s: None) == "swapped"
-    assert old.read_bytes() == b"NEW" and not newf.exists()
+    assert old.read_bytes() == b"NEW" and newf.exists(), \
+        "copy 语义：正名就位且 staged 不删（不动自身映像铁律）"
+    assert not list(base.glob("*.swapnew")), "tmp 中间文件零残留"
     assert (base / "TokenWidget.exe.old").read_bytes() == b"OLD"
     assert not mp.exists() and not (base / up.FAILED_NAME).exists()
     # ② 无 marker：零副作用（老用户正常启动不受扰——双向兼容硬要求）
@@ -516,7 +521,138 @@ def u16_swap_seq() -> str:
     except FileNotFoundError:
         pass
     assert len(calls) == 2, calls
-    return "改名自身换装/零副作用/坏marker/过期陈旧/self救援/FAILED回退/·old清理/重复消费/重试节奏"
+    return "copy+原子就位换装/零副作用/坏marker/过期陈旧/self救援/FAILED回退/·old清理/重复消费/重试节奏"
+
+
+# ---------------------------------------- M28b：copy+接力+确认退出（frozen 语境）----
+
+class _Proc:
+    """Popen 替身：rcs=每次 poll() 的返回码脚本（None=存活）。"""
+
+    def __init__(self, rcs):
+        self.rcs = list(rcs)
+
+    def poll(self):
+        return self.rcs.pop(0) if self.rcs else None
+
+
+def _relay_base(tag: str):
+    base = tmp_root / tag
+    base.mkdir(exist_ok=True)
+    for f in list(base.glob("TokenWidget*")) + [base / "pending_swap.json",
+                                                base / up.FAILED_NAME]:
+        if f.exists():
+            f.unlink()
+    old = base / "TokenWidget.exe"
+    newf = base / "TokenWidget.new.exe"
+    mp = base / "pending_swap.json"
+    old.write_bytes(b"OLD")
+    newf.write_bytes(b"NEW")
+    up.write_marker(old, newf, base=base)
+    return base, old, newf, mp
+
+
+class SpawnCap:
+    def __init__(self, procs):
+        self.procs = list(procs)
+        self.calls: list[dict] = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append({"argv": list(argv), **kw})
+        return self.procs.pop(0)
+
+
+def u32_relay_handed() -> str:
+    """frozen happy path：old→.old、正名内容==staged 字节、marker 删、spawn 收正名
+    路径且**零链参数**（--post-update-swap/--start-marker 绝不再传，防接力递归）、
+    DETACHED 同款旗、cwd=exe 目录；存活确认→exit_fn(0) 交棒、返回 "handed"、无 FAILED。"""
+    _b, old, newf, mp = _relay_base("relay_ok")
+    sc = SpawnCap([_Proc([None] * 20)])
+    exited: list = []
+    r = up.run_pending_swap(current_exe=newf, marker_override=mp,
+                            sleeper=lambda s: None, frozen=True,
+                            spawn=sc, exit_fn=exited.append)
+    assert r == "handed", r
+    assert exited == [0], "确认存活=本 staged 进程交棒退出"
+    assert old.read_bytes() == b"NEW" and (old.parent / "TokenWidget.exe.old").read_bytes() == b"OLD"
+    assert not mp.exists() and not (old.parent / up.FAILED_NAME).exists()
+    assert len(sc.calls) == 1, sc.calls
+    c = sc.calls[0]
+    assert c["argv"] == [str(old)], f"零链参数（{c['argv']}）"
+    assert c["cwd"] == str(old.parent)
+    assert c["creationflags"] == up.SWAP_DETACH_FLAGS
+    assert not (old.parent / (old.name + ".swapnew")).exists(), "tmp 中间文件不残留"
+    return "接力交棒：argv=正名裸启动/cwd/DETACHED/exit(0)/handed"
+
+
+def u33_relay_retry_then_alive() -> str:
+    """首拉早死（poll 拿到返回码）→ 重拉一次存活 → 仍交棒 "handed"（共 2 次 spawn）。"""
+    _b, old, newf, mp = _relay_base("relay_retry")
+    sc = SpawnCap([_Proc([0, None, None]), _Proc([None] * 20)])   # 首个第二轮 poll 给 rc=死
+    exited: list = []
+    r = up.run_pending_swap(current_exe=newf, marker_override=mp,
+                            sleeper=lambda s: None, frozen=True,
+                            spawn=sc, exit_fn=exited.append)
+    assert r == "handed" and len(sc.calls) == 2 and exited == [0], (r, len(sc.calls))
+    assert all(c["argv"] == [str(old)] for c in sc.calls)
+    return "早死重拉一次即存活→交棒"
+
+
+def u34_relay_both_dead_failed() -> str:
+    """两次皆早死 → FAILED.txt(launch_failed)+返回 "failed"+**未 exit**（staged 兜底
+    续跑保窗）；文件层仍正确（正名=新版、marker 已删）。"""
+    _b, old, newf, mp = _relay_base("relay_dead")
+    sc = SpawnCap([_Proc([1]), _Proc([1])])
+    exited: list = []
+    r = up.run_pending_swap(current_exe=newf, marker_override=mp,
+                            sleeper=lambda s: None, frozen=True,
+                            spawn=sc, exit_fn=exited.append)
+    assert r == "failed" and not exited, (r, exited)
+    assert len(sc.calls) == 2
+    ft = (old.parent / up.FAILED_NAME).read_text(encoding="gbk", errors="replace")
+    assert ft.startswith("swap_failed") and "launch_failed" in ft, ft
+    assert old.read_bytes() == b"NEW" and not mp.exists(), "文件层成果保留、marker 已删"
+    return "双败：FAILED(launch_failed)+failed+不退出（staged 保窗）"
+
+
+def u35_relay_spawn_raises() -> str:
+    """spawn 抛 OSError（连拉两次都抛）→ 同归 launch_failed，不炸不退出。"""
+    _b, old, newf, mp = _relay_base("relay_spawn_boom")
+
+    def boom(argv, **kw):
+        raise OSError(5, "access denied")
+
+    exited: list = []
+    r = up.run_pending_swap(current_exe=newf, marker_override=mp,
+                            sleeper=lambda s: None, frozen=True,
+                            spawn=boom, exit_fn=exited.append)
+    assert r == "failed" and not exited
+    ft = (old.parent / up.FAILED_NAME).read_text(encoding="gbk", errors="replace")
+    assert "launch_failed" in ft and "access denied" in ft, ft
+    return "spawn 异常→launch_failed 兜底"
+
+
+def u36_copy_fail_rollback() -> str:
+    """copy 中途异常（tmp 不可写模拟）→ FAILED+marker 删（既有失败语义）；
+    新增防线：**.old 搬回正名**（不留裸缺位）；staged .new 原位保留可自救援。"""
+    _b, old, newf, mp = _relay_base("relay_copyfail")
+    orig = up._copy_into_place
+    try:
+        up._copy_into_place = lambda s, d: (_ for _ in ()).throw(
+            PermissionError(13, "tmp not writable"))
+        r = up.run_pending_swap(current_exe=newf, marker_override=mp,
+                                sleeper=lambda s: None)
+    finally:
+        up._copy_into_place = orig
+    assert r == "failed"
+    assert not mp.exists(), "marker 必清（防重启循环）"
+    ft = (old.parent / up.FAILED_NAME).read_text(encoding="gbk", errors="replace")
+    assert ft.startswith("swap_failed") and "tmp not writable" in ft, ft
+    assert old.read_bytes() == b"OLD", "copy 败→.old 搬回正名（旧版可再启动）"
+    assert not (old.parent / "TokenWidget.exe.old").exists()
+    assert newf.exists(), "staged 原位保留（下次启动 self 救援）"
+    assert not list(old.parent.glob("*.swapnew")), "失败路径 tmp 清理"
+    return "copy 败：FAILED+marker 清+正名回滚+staged 留位"
 
 
 def u19_elevation() -> str:
@@ -1278,6 +1414,11 @@ CASES_PURE = [
     ("no_cmd_artifacts", u14_no_cmd_artifacts),
     ("apply_flow", u15_apply_flow),
     ("swap_seq", u16_swap_seq),
+    ("relay_handed", u32_relay_handed),
+    ("relay_retry", u33_relay_retry_then_alive),
+    ("relay_both_dead", u34_relay_both_dead_failed),
+    ("relay_spawn_raises", u35_relay_spawn_raises),
+    ("copy_fail_rollback", u36_copy_fail_rollback),
     ("next_trigger_matrix", u16_next_trigger_matrix),
     ("stamp", u17_stamp),
     ("probe", u18_probe),
