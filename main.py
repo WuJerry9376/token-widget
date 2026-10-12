@@ -8,6 +8,7 @@
     python main.py --open-settings      # 启动后即开设置面板（调试/截图）
     python main.py --autostart-dry-run  # 打印将写入的自启注册表值，不写注册表
     python main.py --post-update-swap [--start-marker <json>]  # M28 换装（更新链内部用）
+    python main.py --bailian-helper [--profile-dir <dir>]      # 百炼常驻 Helper（stdio 协议，车道 B）
     python main.py --verbose            # stdout 输出每轮采集摘要（不含凭据）
 
 DPI：在创建 Tk 窗口前用 ctypes 设进程 awareness（M26 起优先 PER_MONITOR_AWARE_V2，
@@ -74,8 +75,21 @@ def enable_dpi_awareness() -> str:
         return "unaware"
 
 
+def run_bailian_helper(argv: list[str]) -> int:
+    """--bailian-helper 分支（协议 §1）：常驻 helper 模式，绝不触碰 Tk。"""
+    hp = argparse.ArgumentParser(add_help=False)
+    hp.add_argument("--profile-dir",
+                    default=str(_ROOT / "local" / "webview_profile"))
+    ns, _unknown = hp.parse_known_args(argv)
+    from src import bailian_helper
+    return bailian_helper.main(Path(ns.profile_dir))
+
+
 def main(argv: list[str] | None = None) -> int:
     protect_std_streams()
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if "--bailian-helper" in raw:
+        return run_bailian_helper(raw)
     ap = argparse.ArgumentParser(description="token-widget 桌面便笺浮窗")
     ap.add_argument("--poll", type=int, default=None, help="覆盖轮询秒数（调试）")
     ap.add_argument("--quit-after", type=float, default=None, help="N 秒后退出并保存位置")

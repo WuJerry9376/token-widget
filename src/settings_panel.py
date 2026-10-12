@@ -560,7 +560,19 @@ class SettingsPanel(_Card):
 
     def _open_bind_panel(self, name: str) -> None:
         if name == "bailian":
-            self.app.open_credentials()
+            # M26（2026-10-12）：设置入口优先开「凭据管理」面板——永远有可见
+            # 响应（修复健康会话下交互登录静默成功、用户 perceive「没反应」）；
+            # 面板内含弹窗重登/保存/删除凭据/Cookie 粘贴兜底四个出口。
+            # 无该钩子（老假 app/替身）→ M25 分流逻辑原样保持；再无 → 粘贴面板。
+            manage = getattr(self.app, "_bailian_cred_manage", None)
+            if callable(manage):
+                manage()
+                return
+            click = getattr(self.app, "_bailian_cred_click", None)
+            if callable(click):
+                click()
+            else:
+                self.app.open_credentials()
         else:
             self.app.open_key_panel(name)
 
@@ -1268,6 +1280,178 @@ class CredentialPanel(_Card):
                 self._say("验证超时：拉取尚未回来。可关闭本面板，浮窗会自动重试。", ORANGE)
             return
         self.after(2000, self._verify)
+
+
+class CredManagePanel(_Card):
+    """M26 百炼凭据管理面板（设置→百炼「点击配置」主入口，永远可见响应）。
+
+    修复用户 perceive bug：健康会话下 pill 直通 helper 交互登录静默续期成功、
+    零可见反馈（「没反应」）——显式配置入口必须给出可管理的界面。行 pill 的
+    智能静默路径保持不变（pill 仅在凭据错误态渲染，静默交互在那里是正确语义）。
+
+    - 状态三行：会话状态（最后一轮 bailian Usage）/ helper 运行 / 自动登录
+      凭据（auth.load_bailian_login 试读，仅首字符 + *** 掩码，绝不显密码）；
+    - 弹窗重新登录/切换账号 → app.reauth_login()（helper {"cmd":"reauth"}，
+      daemon 线程 + _login_q 回投，busy 单飞与 pill 共享）；
+    - 保存/更新 → 既有 _ask_save_creds_modal（on_saved 刷新状态行；自动询问
+      路径的 once-per-run 标志语义与此手动入口互不干扰）；
+    - 删除 → askyesno 确认 → auth.delete_bailian_login()；
+    - Cookie 粘贴兜底 → app.open_credentials() 并关闭本面板。
+    """
+
+    def __init__(self, app) -> None:
+        super().__init__(app, "百炼凭据管理", geo_tag="CRED_MANAGE")
+
+        self.lbl_state = tk.Label(self.body, text="", justify="left",
+                                  font=app.f_small, wraplength=420,
+                                  **{**_tk_colors(), "fg": SOFT_TXT})
+        self.lbl_state.pack(anchor="w")
+
+        btns = tk.Frame(self.body, **_frame_kw())
+        btns.pack(anchor="w", pady=(10, 0))
+        self.btn_reauth = tk.Button(btns, text="弹窗重新登录 / 切换账号",
+                                    font=app.f_small_b, cursor="hand2",
+                                    bg=INK, fg=PAPER,
+                                    activebackground="#57503E",
+                                    activeforeground=PAPER,
+                                    relief="flat", bd=0, padx=16, pady=4,
+                                    command=self._reauth)
+        self.btn_reauth.pack(anchor="w")
+        row2 = tk.Frame(btns, **_frame_kw())
+        row2.pack(anchor="w", pady=(6, 0))
+        tk.Button(row2, text="保存/更新自动登录凭据", font=app.f_small,
+                  cursor="hand2", bg=BADGE_BG, fg=SOFT_TXT,
+                  activebackground=BADGE_EDGE, activeforeground=INK,
+                  relief="flat", bd=0, padx=12, pady=4,
+                  highlightthickness=1, highlightbackground=BADGE_EDGE,
+                  command=self._save_creds).pack(side="left")
+        tk.Button(row2, text="删除自动登录凭据", font=app.f_small,
+                  cursor="hand2", bg=BADGE_BG, fg=SOFT_TXT,
+                  activebackground=BADGE_EDGE, activeforeground=INK,
+                  relief="flat", bd=0, padx=12, pady=4,
+                  highlightthickness=1, highlightbackground=BADGE_EDGE,
+                  command=self._delete_creds).pack(side="left", padx=(8, 0))
+        tk.Button(self.body, text="手动粘贴 Cookie（兜底）", font=app.f_small,
+                  cursor="hand2", bg=BADGE_BG, fg=SOFT_TXT,
+                  activebackground=BADGE_EDGE, activeforeground=INK,
+                  relief="flat", bd=0, padx=12, pady=4,
+                  highlightthickness=1, highlightbackground=BADGE_EDGE,
+                  command=self._paste_cookie).pack(anchor="w", pady=(6, 0))
+
+        self.status = tk.Label(self.body, text="", font=app.f_small,
+                               wraplength=420, justify="left",
+                               **{**_tk_colors(), "fg": SOFT_TXT})
+        self.status.pack(anchor="w", pady=(8, 0))
+        tk.Button(self.body, text="关闭", font=app.f_small, cursor="hand2",
+                  bg=BADGE_BG, fg=SOFT_TXT, activebackground=BADGE_EDGE,
+                  activeforeground=INK, relief="flat", bd=0, padx=16, pady=4,
+                  highlightthickness=1, highlightbackground=BADGE_EDGE,
+                  command=self.close_card).pack(anchor="e", pady=(4, 0))
+
+        self.update_status()
+        self.finish()
+
+    # ================= 状态行 =================
+
+    def update_status(self) -> None:
+        """重算三行状态（开面板 / 动作后 / drain 回投时调用；全守卫不抛）。"""
+        if not self.alive():
+            return
+        lines = [f"会话状态：{self._session_text()}",
+                 f"常驻助手：{self._helper_text()}",
+                 f"自动登录凭据：{self._cred_text()}"]
+        self.lbl_state.configure(text="\n".join(lines))
+
+    def _session_text(self) -> str:
+        u = next((x for x in getattr(self.app, "usages", ())
+                  if getattr(x, "provider", "") == "bailian"), None)
+        if u is None:
+            return "尚无拉取记录"
+        if u.ok:
+            return "正常（最近一轮成功）"
+        return f"异常（{u.error_code or 'ERROR'}）"
+
+    def _helper_text(self) -> str:
+        src = None
+        getter = getattr(self.app, "_bailian_source", None)
+        if callable(getter):
+            try:
+                src = getter()
+            except Exception:                            # noqa: BLE001
+                src = None
+        if src is None or getattr(src, "mode", "legacy") == "legacy":
+            return "未启用（旧版 Cookie 传输）"
+        try:
+            return "运行中" if getattr(src, "helper_running", False) else "未运行"
+        except Exception:                                # noqa: BLE001
+            return "状态未知"
+
+    def _cred_text(self) -> str:
+        """CM 账密只显掩码：账号首字符 + ***；读取异常按未保存处理。"""
+        try:
+            rec = auth.load_bailian_login()
+        except Exception:                                # noqa: BLE001
+            return "未保存（读取失败）"
+        if rec is None:
+            return "未保存"
+        user = str((rec or ("", ""))[0])[:1]
+        return f"已保存（{user or '?'}***）"
+
+    # ================= 动作 =================
+
+    def _say(self, msg: str, col: str = SOFT_TXT) -> None:
+        self.status.configure(text=msg, fg=col)
+
+    def _reauth(self) -> None:
+        starter = getattr(self.app, "reauth_login", None)
+        if not callable(starter):
+            self._say("当前版本不支持弹窗重新登录；请用「手动粘贴 Cookie」兜底。",
+                      ORANGE)
+            return
+        if starter():
+            self._say("已请求重新登录：助手将在需要时弹出登录窗口，"
+                      "完成或失败后本面板状态自动更新。")
+        else:
+            busy = bool(getattr(self.app, "_login_busy", False))
+            self._say("已有登录流程在途，请稍候再试。" if busy else
+                      "常驻助手未运行，无法弹窗重新登录；"
+                      "可用「手动粘贴 Cookie」兜底。", ORANGE)
+
+    def _save_creds(self) -> None:
+        modal = getattr(self.app, "_ask_save_creds_modal", None)
+        if not callable(modal):
+            self._say("当前版本不支持在此保存凭据。", ORANGE)
+            return
+        try:
+            modal(on_saved=self.update_status)
+        except TypeError:                # 旧签名（无 on_saved 形参）→ 原样调用
+            modal()
+        self.update_status()
+
+    def _delete_creds(self) -> None:
+        from tkinter import messagebox
+        try:
+            ans = messagebox.askyesno(
+                "删除自动登录凭据?",
+                "将从 Windows 凭据管理器删除百炼自动登录账密"
+                "（token-widget/bailian-login）。删除后会话过期时不再自动续期，"
+                "需手动登录或重新保存凭据。确定删除吗？", parent=self)
+        except Exception:                # 弹窗环境异常不打断主循环
+            return
+        if not ans:
+            return
+        try:
+            done = auth.delete_bailian_login()
+        except Exception as e:            # 只报类型，无凭据明文
+            self._say(f"删除失败：{type(e).__name__}", RED)
+            self.update_status()
+            return
+        self._say("已删除自动登录凭据。" if done else "未找到已保存的凭据。", OK)
+        self.update_status()
+
+    def _paste_cookie(self) -> None:
+        self.app.open_credentials()
+        self.close_card()
 
 
 class ProviderKeyPanel(_Card):

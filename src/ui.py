@@ -70,6 +70,15 @@
 - 失败降级：有最后成功值 → 灰显 +「旧数据」标记；LOGIN_EXPIRED/NO_CREDENTIAL/
   KEY_INVALID/NO_SUBSCRIPTION → 橙色凭据档（bailian 走 Cookie 面板、OpenAI/Go 走密钥面板）；
   RATE_LIMITED/NETWORK 等走灰 stale 档；绝不渲染空值假象。凭据（Cookie/key）永不进入 UI。
+- M27 自动续期（auto-renewal）：一轮 poll 收尾 bailian error_code==LOGIN_EXPIRED（helper
+  报 need_login，会话掉了——非 NO_CREDENTIAL 首登态）且 mode!=legacy 且 helper_running 且
+  CM 有账密（source.has_saved_creds，读异常按无凭据）且冷却 AUTO_RENEW_COOLDOWN(600s) 已过
+  且非 _login_busy → 自动调用与点击 pill 完全同路的 _bailian_cred_click（复用 M25 daemon
+  线程机器，零新线程：login_interactive → helper L2 静默自动填充续期；L3 仅在验证码拦路时
+  弹窗，届时既有 event_text 流程显示「等待人工登录（助手已弹窗）」，pill 文案不变）。判定
+  单一真相源=模块级纯函数 should_auto_renew；_maybe_auto_renew 挂在 _drain 结果落地分支
+  （每 poll 轮一次，非每 250ms tick）。冷却 + 单飞 + 仅 LOGIN_EXPIRED ⇒ 每 10min 至多一次，
+  交互失败不重武装（时间戳已消费）。凭据值仍永不进入 UI。
 - 数据契约只消费 src.sources.base.Usage/Window，不感知供应商协议。
 """
 from __future__ import annotations
@@ -145,6 +154,61 @@ SPECS = {"lite": "Lite", "standard": "Standard", "pro": "Pro", "max": "Max"}
 # 已含「切换海外节点」指引，主窗橙档更醒目；scheduler 退避行为不变（分类在 sources 层，此处仅配色）。
 CRED_ERRORS = {"LOGIN_EXPIRED", "NO_CREDENTIAL", "KEY_INVALID", "NO_SUBSCRIPTION",
                "REGION_BLOCKED"}
+
+# ---------- §6.4 交互登录成功后「是否保存凭据」决策（纯函数，无副作用，便于单测） ----------
+
+
+def should_prompt_save_creds(ok: bool, has_cred: bool, prompted: bool) -> bool:
+    """仅当「登录成功 & CM 无既有凭据 & 本次运行尚未询问过」才询问保存（一次/run）。"""
+    return bool(ok) and not has_cred and not prompted
+
+
+def _unpack_login_item(item) -> tuple[str, object]:
+    """M26 交互登录队列项归一：(kind, res) 新形态直通；裸 res 旧形态（测试替身
+    直接 put dict/None）按 kind="login" 处理——既有 FakeApp 期望零改动。"""
+    if (isinstance(item, tuple) and len(item) == 2
+            and isinstance(item[0], str) and item[0] in ("login", "reauth")):
+        return item[0], item[1]
+    return "login", item
+
+
+# ---------- 自动续期（auto-renewal）：会话掉线自动走交互登录（复用 M25 机器，无新线程） ----------
+#
+# 触发面（全部纯读，主线程零阻塞 I/O，CM CredRead 快同步 ~ms 已在决策入口兜异常）：
+# 一轮 poll 收尾 bailian error_code==LOGIN_EXPIRED（helper 报 need_login，会话掉了；
+# NO_CREDENTIAL 是「无账密」首登态，不自动弹，交人工点击）且 mode!=legacy 且 helper 活着
+# 且 CM 存有账密 且 距上次自动尝试 ≥ 冷却 且 无在途登录。命中即调用与点击 pill 完全同路
+# 的 _bailian_cred_click（daemon 线程 → login_interactive → helper L2 静默自动填充续期；
+# L3 弹窗仅在验证码拦路时出现，届时既有 event_text 流程显示「等待人工登录（助手已弹窗）」）。
+# 冷却 + 单飞 + 仅 LOGIN_EXPIRED ⇒ 每 10min 至多一次交互；交互失败的响应不再重武装
+# （busy 已释放、时间戳已消费）。
+AUTO_RENEW_COOLDOWN = 600.0    # 两次自动续期尝试的最小间隔（秒）
+
+
+def _bailian_error_code(usages) -> str | None:
+    """本轮 bailian Usage 的错误码：成功 → None；失败 → error_code；无 bailian 行 → None。
+
+    纯读入参（self.usages 是 _drain 应用的最新一轮原始 Usage，未经 last_good 折叠）。"""
+    for u in usages or ():
+        if getattr(u, "provider", None) == "bailian":
+            return None if getattr(u, "ok", False) else getattr(u, "error_code", None)
+    return None
+
+
+def should_auto_renew(error_code: str | None, mode: str, helper_running: bool,
+                      has_creds: bool, login_busy: bool, elapsed: float,
+                      cooldown: float = AUTO_RENEW_COOLDOWN) -> bool:
+    """自动续期判定的单一真相源（纯函数：所有取数在调用方完成后传入，无 I/O、无副作用）。
+
+    全部成立才放行：LOGIN_EXPIRED（非 NO_CREDENTIAL）· 非 legacy · helper 活着 ·
+    CM 有账密 · 无在途登录 · 冷却已过。任一不满足 → False（不自动弹登录）。"""
+    return (error_code == "LOGIN_EXPIRED"
+            and mode != "legacy"
+            and bool(helper_running)
+            and bool(has_creds)
+            and not login_busy
+            and elapsed >= cooldown)
+
 
 # ---------- M9 屏幕边缘自吸附（逻辑 px；物理判定处 ×S 随 DPI 缩放） ----------
 SNAP_PX = 28           # 吸附触发距离：释放位与工作区边距 ≤ 此值 → 贴齐该边（0 间距）
@@ -691,6 +755,7 @@ class NoteApp:
         self.clicks: list[tuple[float, float, float, float, Callable[[], None]]] = []
         self._settings = None            # 设置面板（单例）
         self._cred_panel = None          # 百炼凭据粘贴面板（单例）
+        self._cred_manage = None         # M26 百炼凭据管理面板（单例，永远可见响应）
         self._key_panels: dict = {}      # M6：各源密钥绑定面板（各自单例；M11a 起 Go/Codex）
 
         # ---- M7-b 刷新图标：↻ 步进旋转状态（after 循环，主线程，无新线程） ----
@@ -712,6 +777,12 @@ class NoteApp:
         self._upd_startup_done = False     # 进程内启动触发是否已消费
         self._upd_new: updater.UpdateInfo | None = None   # 发现未处理新版（UpdateInfo）→ 亮橙点
         self._upd_force_open = False       # 橙点点击 → 开设置并 force 检查一次
+
+        # ---- M25 helper 感知百炼凭据入口：交互登录子线程 → queue → _drain 回投 ----
+        self._login_q: queue.Queue = queue.Queue()
+        self._login_busy = False           # 单飞：在途 interactive_login 只允许一个
+        self._creds_prompted = False       # §6.4 保存凭据询问：每 app 运行至多一次
+        self._auto_renew_ts = 0.0          # 自动续期：上次自动尝试时刻（monotonic；冷却闸）
 
         self._make_menu()
         self._bind()
@@ -1191,6 +1262,252 @@ class NoteApp:
         from .settings_panel import CredentialPanel
         self._cred_panel = CredentialPanel(self)
 
+    # ---- M25 helper 感知凭据入口（login_interactive 子线程；旧路径行为保持）----
+
+    def _bailian_source(self):
+        """从调度器取百炼 source（测试/空源环境取不到 → None，走旧粘贴路径）。"""
+        for s in getattr(self.sched, "sources", ()):
+            if getattr(s, "name", "") == "bailian":
+                return s
+        return None
+
+    def _bailian_cred_click(self) -> None:
+        """凭据 pill 点击：非 legacy 且常驻 helper 活 → 子线程交互登录（绝不
+        阻塞 mainloop；helper 弹窗经 login_required 事件呈现在行文案上）；
+        legacy / helper 不可用 → 原 Cookie 粘贴面板（行为保持）。"""
+        src = self._bailian_source()
+        if (src is not None and getattr(src, "mode", "legacy") != "legacy"
+                and getattr(src, "helper_running", False)
+                and hasattr(src, "interactive_login")):
+            if self._login_busy:
+                return                          # 在途：等回投/下轮渲染，不重复起线程
+            self._login_busy = True
+            threading.Thread(target=self._cred_login_work, args=(src,),
+                             daemon=True, name="bailian-interactive-login").start()
+            return
+        self.open_credentials()
+
+    def reauth_login(self) -> bool:
+        """M26 管理面板「弹窗重新登录/切换账号」出口：复用 _cred_login_work/
+        _cred_login_drain 队列机器（kind=reauth），busy 单飞与 pill 共享。
+        helper 不可用/在途 → False（调用方给文案提示），绝不阻塞 mainloop。"""
+        src = self._bailian_source()
+        if (src is None or getattr(src, "mode", "legacy") == "legacy"
+                or not getattr(src, "helper_running", False)
+                or not hasattr(src, "reauth_login")):
+            return False
+        if self._login_busy:
+            return False                          # 在途：等回投，不重复起线程
+        self._login_busy = True
+        threading.Thread(target=self._cred_login_work, args=(src, "reauth"),
+                         daemon=True, name="bailian-interactive-login").start()
+        return True
+
+    def _bailian_cred_manage(self) -> None:
+        """M26：设置→百炼「点击配置」主入口——凭据管理面板永远可见地打开
+        （修复健康会话下 pill 直通静默刷新、用户 perceive「没反应」）。
+        单例同 open_credentials；行 pill（_bailian_cred_click）行为保持不变。"""
+        if self._cred_manage is not None and self._cred_manage.alive():
+            self._cred_manage.lift()
+            return
+        from .settings_panel import CredManagePanel
+        self._cred_manage = CredManagePanel(self)
+
+    def _cred_login_work(self, src, kind: str = "login") -> None:
+        """worker 线程：只投 queue（同 M16 纪律），UI 动作全在 _cred_login_drain。
+        kind ∈ login|reauth（M26：队列元组携带工作项类型，drain 侧据此分流反馈）。"""
+        try:
+            if kind == "reauth" and hasattr(src, "reauth_login"):
+                res = src.reauth_login()        # None = helper 不可用；阻塞至回包
+            else:
+                res = src.interactive_login()   # None = helper 不可用；阻塞至回包
+        except Exception as e:                  # noqa: BLE001 线程兜底（信息无凭据）
+            print(f"[ui] 交互登录异常：{type(e).__name__}", flush=True)
+            res = None
+        self._login_q.put((kind, res))
+
+    def _cred_login_drain(self) -> None:
+        """_drain(250ms) 消费交互登录结果（全主线程）：None → 回落粘贴面板；
+        回包 → 重绘呈现事件文案；登录成功额外立即刷新。
+        M26：队列新形态 (kind, res) 元组；kind=reauth 成功额外弹「登录状态已刷新」
+        （reauth 恒为用户显式发起，静默成功反而像没反应）；旧裸 res 形态兼容
+        （test_helper_ui_state / test_save_creds_prompt 替身直接 put 裸值）。"""
+        fallback = redraw = ok = reauth_ok = False
+        try:
+            while True:
+                kind, res = _unpack_login_item(self._login_q.get_nowait())
+                self._login_busy = False
+                redraw = True
+                if res is None:
+                    fallback = True
+                elif isinstance(res, dict) and res.get("ok"):
+                    ok = True
+                    reauth_ok = reauth_ok or kind == "reauth"
+        except queue.Empty:
+            pass
+        if self._quitting or not (fallback or redraw):
+            return
+        if fallback:
+            self.open_credentials()
+        elif ok:
+            self.refresh()
+            if reauth_ok:
+                try:
+                    from tkinter import messagebox
+                    messagebox.showinfo("重新登录", "登录状态已刷新")
+                except Exception:               # noqa: BLE001 无 root/替身环境静默
+                    pass
+            # §6.4：手动登录成功 → 询问是否保存凭据（getattr 守卫：只借用旧方法
+            # 的测试假 app 无此钩子，行为保持不炸）
+            hook = getattr(self, "_maybe_prompt_save_creds", None)
+            if hook is not None:
+                hook(True)
+        else:
+            self._render()
+        if ok:
+            # 管理面板开着 → 状态行即时更新（getattr/try 守卫：假 app 无面板属性）
+            panel = getattr(self, "_cred_manage", None)
+            if panel is not None:
+                upd = getattr(panel, "update_status", None)
+                if callable(upd):
+                    try:
+                        upd()
+                    except Exception:           # noqa: BLE001 面板已关等异常不打断泵
+                        pass
+
+    def _maybe_auto_renew(self) -> None:
+        """自动续期触发口（_drain 每 250ms 调用；纯读判定 + 复用 _bailian_cred_click）。
+
+        判定走 should_auto_renew（模块级纯函数，单一真相源）。命中即消费冷却时间戳、
+        调用与用户点击 pill 完全同路的 _bailian_cred_click（其内部守卫再校验 mode/
+        helper/busy 并起 daemon 线程）。CM 账密存在性经 source.has_saved_creds 读
+        （属性已兜异常→False）；任何异常都不得打断 250ms 事件泵（整体 try 兜）。
+
+        零-I/O 前置闸：正常登录态 error_code≠LOGIN_EXPIRED（或冷却未满/在途）即返回，
+        不去读 source.mode（配置文件）/helper_running（proc.poll）/CM——把带 I/O 的
+        取数与最终判定都推到「确有一个过期轮次且冷却已过」之后。should_auto_renew
+        仍是权威结论（前置闸只是省 I/O 的同源子集）。"""
+        if self._quitting:
+            return
+        try:
+            code = _bailian_error_code(self.usages)     # 纯读缓存：正常轮次到此即否决
+            if code != "LOGIN_EXPIRED" or self._login_busy:
+                return
+            src = self._bailian_source()
+            if src is None:
+                return
+            elapsed = time.monotonic() - self._auto_renew_ts
+            if elapsed < AUTO_RENEW_COOLDOWN:           # 冷却闸（零 I/O）先挡，免 CM 风暴
+                return
+            if not should_auto_renew(
+                    code,
+                    getattr(src, "mode", "legacy"),
+                    getattr(src, "helper_running", False),
+                    getattr(src, "has_saved_creds", False),
+                    self._login_busy,
+                    elapsed):
+                return
+            self._auto_renew_ts = time.monotonic()      # 先消费冷却：成功/失败皆不重武装
+            self._bailian_cred_click()
+        except Exception as e:                          # noqa: BLE001 绝不拖垮 _drain
+            if self.verbose:
+                print(f"[ui] 自动续期判定异常（已跳过）：{type(e).__name__}", flush=True)
+
+    def _maybe_prompt_save_creds(self, ok: bool) -> None:
+        """§6.4：交互登录成功且 CM 无凭据 → 每次运行至多询问一次是否保存账密。
+
+        - load 异常按"无凭据"处理（prompted 标志保证轮询风暴下不重复弹问）；
+        - 询问文案不含任何账密信息；用户答"是"才开小模态；答否/关闭静默返回。"""
+        if not ok or getattr(self, "_creds_prompted", False):
+            return
+        from . import auth
+        try:
+            has_cred = auth.load_bailian_login() is not None
+        except Exception:
+            has_cred = False
+        if not should_prompt_save_creds(True, has_cred, False):
+            return
+        self._creds_prompted = True
+        from tkinter import messagebox
+        try:
+            ans = messagebox.askyesno(
+                "保存自动登录凭据?",
+                "检测到本次为手动登录。是否将阿里云账号密码保存到 Windows "
+                "凭据管理器（token-widget/bailian-login），以便会话过期后自动"
+                "续期？可在控制面板随时删除。",
+                parent=self.root)
+        except Exception:                     # 弹窗环境异常不打断主循环
+            return
+        if ans:
+            self._ask_save_creds_modal()
+
+    def _ask_save_creds_modal(self, on_saved=None) -> None:
+        """§6.4 保存小模态：账号/密码两输入框（密码 show="*"，均不预填）。
+
+        - OK → auth.save_bailian_login(user, pwd)；ValueError/其他异常 → 错误
+          messagebox 仅含异常类型名，绝不回显卡号/密码；
+        - Cancel/关闭/Escape → 静默销毁；全程零日志明文；
+        - on_saved（M26 管理面板用，可选）：保存成功后回调（刷新状态行）；
+          自动询问路径（_maybe_prompt_save_creds）不带参数调用，语义不变。"""
+        from . import auth
+        from tkinter import messagebox
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("保存自动登录凭据")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="账号").grid(row=0, column=0, padx=10,
+                                        pady=(12, 4), sticky="e")
+        ent_user = tk.Entry(dlg, width=32)
+        ent_user.grid(row=0, column=1, padx=(4, 14), pady=(12, 4), sticky="w")
+        tk.Label(dlg, text="密码").grid(row=1, column=0, padx=10, pady=4,
+                                        sticky="e")
+        ent_pwd = tk.Entry(dlg, width=32, show="*")
+        ent_pwd.grid(row=1, column=1, padx=(4, 14), pady=4, sticky="w")
+
+        def on_ok() -> None:
+            user, pwd = ent_user.get(), ent_pwd.get()
+            if not user or not pwd:
+                messagebox.showwarning("不能为空", "账号和密码均不能为空。")
+                return
+            try:
+                auth.save_bailian_login(user, pwd)
+                saved = True
+            except Exception as e:            # 只报类型：auth 消息本身不含明文，双保险
+                saved = False
+                messagebox.showerror(
+                    "保存失败",
+                    f"写入 Windows 凭据管理器失败：{type(e).__name__}")
+            for ent in (ent_user, ent_pwd):   # 明文不留控件（destroy 前擦除，防御性）
+                try:
+                    ent.delete(0, tk.END)
+                except tk.TclError:
+                    pass
+            dlg.destroy()
+            if saved and on_saved is not None:   # M26：管理面板据此刷新状态行
+                try:
+                    on_saved()
+                except Exception:                # noqa: BLE001 刷新失败不影响保存
+                    pass
+
+        def on_cancel() -> None:
+            dlg.destroy()
+
+        btns = tk.Frame(dlg)
+        btns.grid(row=2, column=0, columnspan=2, pady=(6, 12))
+        tk.Button(btns, text="保存", width=8, command=on_ok).pack(side="left",
+                                                                  padx=6)
+        tk.Button(btns, text="取消", width=8, command=on_cancel).pack(side="left",
+                                                                      padx=6)
+        dlg.bind("<Escape>", lambda _e: on_cancel())
+        dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+        ent_user.focus_set()
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
     def open_key_panel(self, provider: str) -> None:
         """M6/M10：OpenAI / OpenCode Go / Codex 密钥绑定面板（按 provider 各自单例）。"""
         p = self._key_panels.get(provider)
@@ -1292,12 +1609,16 @@ class NoteApp:
                     if self.verbose:
                         self._log_cycle(payload, meta)
                     self._render()
+                    # 自动续期：本轮结果落地即判一次（每 poll 轮一次，非每 250ms tick；
+                    # 会话掉线时免对已卡住的非时间条件反复读 config/CM/poll）。
+                    self._maybe_auto_renew()
         except queue.Empty:
             pass
         except Exception as e:                    # 渲染异常不能让事件循环停摆（信息不含凭据）
             print(f"[ui] 渲染异常（已跳过本轮）：{type(e).__name__}: {str(e)[:160]}",
                   flush=True)
         self._upd_drain()                       # M16：同循环顺带消费自动更新结果（无新轮询）
+        self._cred_login_drain()                # M25：透明登录回包（无新轮询，同 250ms tick）
         self._check_dpi()                       # M26：每轮比对窗口 DPI（1 记 user32 调用）
         self.root.after(250, self._drain)
 
@@ -1725,7 +2046,14 @@ class NoteApp:
     def _cred_ui(self, u: Usage) -> tuple[str, str, Callable[[], None]]:
         """凭据档（CRED_ERRORS）行的 (警示文案, 按钮文案, 动作)：百炼=Cookie，OpenAI/Go=key。"""
         if u.provider == "bailian":
-            return ("需重新登录凭据（Cookie 过期）", "更新登录凭据…", self.open_credentials)
+            # M25：非 legacy 且 helper 已发事件（login_required/login_failed）→ 行文案
+            # 用事件语义；点击一律走 _bailian_cred_click（内部再分 helper/粘贴两路）。
+            txt = "需重新登录凭据（Cookie 过期）"
+            src = self._bailian_source()
+            if (src is not None and getattr(src, "mode", "legacy") != "legacy"
+                    and getattr(src, "event_text", None)):
+                txt = src.event_text
+            return (txt, "更新登录凭据…", self._bailian_cred_click)
         code = u.error_code or ""
         if code == "REGION_BLOCKED":
             # fix-5 定案：橙档但环境态——文案指路换节点，按钮给「立即重试」（换好节点即恢复）

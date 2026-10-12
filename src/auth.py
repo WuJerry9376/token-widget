@@ -248,6 +248,98 @@ def cookie_value(cookie_str: str, name: str) -> str | None:
     return None
 
 
+# ================= M：Windows 凭据管理器（CM）通用凭据 —— 百炼登录账密 =================
+# 协议 §8 固定契约（车道 A）：CredWriteW/CredReadW/CredDeleteW（advapi32）存百炼
+# 账密供 L2 自动填充。纪律：
+# - CredentialBlob = password 的 UTF-16-LE 精确编码（不追加尾部 NUL，尺寸语义无歧义），
+#   编码后 >512B → ValueError；
+# - 绝不打印/回显 username/password 值；异常信息只含 API 名与系统错误码；
+# - 函数在调用时读模块级 CM_TARGET：测试 monkeypatch 到一次性
+#   token-widget-test-<rand> 目标，禁止触碰真实目标与 local\ 文件。
+
+CRED_TYPE_GENERIC = 1
+CRED_PERSIST_LOCAL_MACHINE = 2
+_ERROR_NOT_FOUND = 1168
+CM_TARGET = "token-widget/bailian-login"
+
+
+class _CREDENTIALW(ctypes.Structure):
+    """advapi32 CREDENTIALW 最小结构（x64 实测布局同 wincred.h：TargetName@+8、
+    FILETIME@+24、UserName 尾字段@+72，共 80B；MSDN 网页示例里的 Length 前置字段序
+    是旧文档，直接照抄会 ERROR_INVALID_PARAMETER/AV。x64 由 ctypes 自动补 padding）。"""
+    _fields_ = [
+        ("Flags", wt.DWORD),
+        ("Type", wt.DWORD),
+        ("TargetName", wt.LPWSTR),
+        ("Comment", wt.LPWSTR),
+        ("LastWritten", wt.FILETIME),
+        ("CredentialBlobSize", wt.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_byte)),
+        ("Persist", wt.DWORD),
+        ("AttributeCount", wt.DWORD),
+        ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", wt.LPWSTR),
+        ("UserName", wt.LPWSTR),
+    ]
+
+
+def _advapi32():
+    return ctypes.windll.advapi32
+
+
+def save_bailian_login(username: str, password: str) -> None:
+    """写入/覆盖 CM 通用凭据（Type=GENERIC，Persist=LOCAL_MACHINE）。
+
+    - password UTF-16-LE 编码后 >512B → ValueError（消息只含长度，无内容）；
+    - CredWriteW 失败 → RuntimeError（只含错误码）。
+    """
+    blob = password.encode("utf-16-le")
+    if len(blob) > 512:
+        raise ValueError(f"password UTF-16-LE 编码长度 {len(blob)}B 超过 512B 上限")
+    target = CM_TARGET
+    cred = _CREDENTIALW()
+    buf = ctypes.create_string_buffer(blob, len(blob))   # 精确 len，不留尾部 NUL 歧义
+    cred.Type = CRED_TYPE_GENERIC
+    cred.TargetName = target
+    cred.UserName = username
+    cred.CredentialBlobSize = len(blob)
+    cred.CredentialBlob = ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte))
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE
+    if not _advapi32().CredWriteW(ctypes.byref(cred), 0):
+        raise RuntimeError(f"CredWriteW failed (error {ctypes.GetLastError()})")
+
+
+def load_bailian_login() -> tuple[str, str] | None:
+    """读取 CM 通用凭据 → (username, password)；不存在（ERROR_NOT_FOUND）→ None。
+
+    其他失败 → RuntimeError（只含错误码，绝不含凭据内容）；
+    CredReadW 返回的凭据块一律 Kernel32.LocalFree（finally 保证释放）。
+    """
+    ptr = ctypes.POINTER(_CREDENTIALW)()
+    ok = _advapi32().CredReadW(CM_TARGET, CRED_TYPE_GENERIC, 0, ctypes.byref(ptr))
+    if not ok:
+        err = ctypes.GetLastError()
+        if err == _ERROR_NOT_FOUND:
+            return None
+        raise RuntimeError(f"CredReadW failed (error {err})")
+    try:
+        c = ptr.contents
+        blob = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize)
+        return (c.UserName or "", blob.decode("utf-16-le"))
+    finally:
+        _kernel32().LocalFree(ctypes.cast(ptr, ctypes.c_void_p))
+
+
+def delete_bailian_login() -> bool:
+    """删除 CM 通用凭据：删除成功 True；不存在 False；其他失败 RuntimeError（只含错误码）。"""
+    if _advapi32().CredDeleteW(CM_TARGET, CRED_TYPE_GENERIC, 0):
+        return True
+    err = ctypes.GetLastError()
+    if err == _ERROR_NOT_FOUND:
+        return False
+    raise RuntimeError(f"CredDeleteW failed (error {err})")
+
+
 if __name__ == "__main__":
     c = load_bailian_cookie()
     print(f"cookie chars={len(c)}")

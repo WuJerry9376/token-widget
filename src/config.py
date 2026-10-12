@@ -24,6 +24,9 @@ DEFAULTS: dict = {
     "always_on_top": True,
     "autostart": False,
     "enabled_providers": ["bailian"],
+    # 百炼采集传输（docs/bailian_auto_auth_plan.md §3）："auto"=helper 优先、失败降级
+    # 旧 Cookie 路；"helper"=仅 helper；"legacy"=仅 urllib+粘贴 Cookie（现状行为）。
+    "bailian_mode": "auto",
     # M6：OpenCode Go 配置节（auto_detect=是否允许从 opencode auth.json 自动检测 Go key）
     # M11a（2026-09-15 用户裁决）：OpenAI API 侧移除，config.openai 节随 source 一并删除
     "opencode_go": {"auto_detect": True},
@@ -60,6 +63,8 @@ def _clamp(cfg: dict) -> dict:
         cfg["poll_seconds"] = max(POLL_MIN_SECONDS, int(cfg.get("poll_seconds", 300)))
     except (TypeError, ValueError):
         cfg["poll_seconds"] = DEFAULTS["poll_seconds"]
+    m = str(cfg.get("bailian_mode", DEFAULTS["bailian_mode"])).strip().lower()
+    cfg["bailian_mode"] = m if m in ("auto", "helper", "legacy") else "auto"
     return cfg
 
 

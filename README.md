@@ -12,12 +12,12 @@ A Windows sticky-note widget that keeps your LLM subscription quotas on the desk
 
 ## Features
 
-- **One file, nothing to install.** A single ~10.7 MB `TokenWidget.exe` for Windows 10/11 x64. The product code is Python standard library only — no runtime, no dependencies.
+- **One file, nothing to install.** A single ~15 MB `TokenWidget.exe` for Windows 10/11 x64. No Python runtime, no third-party installs: the core is pure Python standard library. The optional Bailian auto-login helper ships embedded and rides on the Edge WebView2 runtime Windows already provides; where that runtime is missing the app automatically falls back to the manual cookie-paste path.
 - **Three sources, one note.** Bailian Token Plan (7-day credits + booster pool + plan expiry + reset countdown), OpenCode Go (5h/day/week usage bars), and ChatGPT Codex plan windows (experimental). Each provider renders as one row on a paper-note card.
 - **Edge snapping.** Drag it near a screen edge and it slides flush; window position is remembered across runs and monitors.
 - **Self-update you actually confirm.** Version checks come from the GitHub Releases API at three quiet trigger points (startup / settings page / daily), a confirmation dialog shows version, date, size and release notes, and the download only starts when you click Update. Nothing is ever replaced silently.
 - **Hash-anchored downloads.** Every staged binary is verified against the SHA-256 digest published by the official GitHub API. An optional mirror site may carry the bytes when your direct connection is unreliable — it never supplies version info or hashes.
-- **Credentials stay on your machine.** Cookies and API keys are encrypted with Windows DPAPI, bound to your current user account; they never leave the machine except to the provider's own endpoint.
+- **Credentials stay on your machine.** Cookies are encrypted with Windows DPAPI and auto-login passwords are kept in the Windows Credential Manager, both bound to your current user account; they never leave the machine except to the provider's own endpoint.
 - **Proxy-aware.** HTTP/CONNECT proxies (typical Clash/V2Ray mixed port `127.0.0.1:7890`) can be scoped to OpenCode Go / Codex only. Bailian never goes through the proxy.
 
 ## Getting started
@@ -100,7 +100,7 @@ A Windows sticky-note widget that keeps your LLM subscription quotas on the desk
 
 ## For developers
 
-Python 3.12 + Tkinter, product code stdlib-only. Run from source: `python main.py`; data check: `python cli.py`; full gate: `pwsh -File tests\run_all_m9b.ps1` (187 checks); build: `pwsh -File build\build.ps1` (~20 s → `dist\TokenWidget.exe`). This repository intentionally carries only product code, tests and the storefront screenshots — maintainer docs (wire specs, operations manual, release SOP) live with the primary maintainer and are not mirrored here.
+Python 3.12 + Tkinter; product code is stdlib core plus one bundled bridge (pywebview) used only by the optional Bailian login helper. Run from source: `python main.py`; data check: `python cli.py`; full gate: `pwsh -File tests\run_all_m9b.ps1`; build: `pwsh -File build\build.ps1` (~35 s → `dist\TokenWidget.exe`). This repository intentionally carries only product code, tests and the storefront screenshots — maintainer docs (wire specs, operations manual, release SOP) live with the primary maintainer and are not mirrored here.
 
 ---
 

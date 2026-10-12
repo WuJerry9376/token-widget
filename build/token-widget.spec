@@ -50,6 +50,11 @@ a = Analysis(
         "test", "unittest", "pydoc_data",
         "httpx", "requests",       # 业务只用 urllib.request（注意：不能排除 http，
                                    # urllib.request 依赖 http.client）
+        "cryptography",            # 仅 pywebview `__generate_ssl_cert()` 函数内延迟
+                                   # import（ssl=True 才触发）；helper 的 webview.start()
+                                   # 从不传 ssl → 死代码，排除可省 ~9.5MB（未压缩计）。
+                                   # 若日后启用 https 内嵌服务，需移除此行重装依赖。
+        # 注意：pywebview/bottle/proxy_tools/clr/pythonnet 均不得排除（helper 依赖）。
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

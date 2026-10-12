@@ -1,5 +1,7 @@
 # 运行数据与凭据（绝不入库）
 local/
+# 百炼 helper WebView2 profile（协议 §7 明文纪律；local/ 已覆盖，此处显式兜底）
+local/webview_profile/
 dist/
 auth.json
 *.dpapi
@@ -23,5 +25,6 @@ docs/screenshots/m3c_*.png
 scripts/
 tools/
 build/README.md
+build/PACKAGE_REPORT.md
 build/icon/make_icon.py
 tests/capture_*.py
