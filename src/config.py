@@ -38,11 +38,16 @@ DEFAULTS: dict = {
     # M15：更新（GitHub Releases）。repo="owner/name"（空=未配置，UI 提示、零网络）；
     # enabled=自动检查开关（设置页「自动更新」）；last_check=上次检查 epoch 秒；
     # M16：last_auto_date=每日 5 点后触发已消费的本地日期（YYYY-MM-DD，防重）。
-    # M18：mirror=下载备用源前缀（""=不使用；仅救 11MB 二进制，版本信息恒走官方 API；
+    # M18：mirror=下载备用源前缀（""=不使用；仅救二进制，永不参与元数据；
     # 存 normalize_mirror 规范化形态 "https://host[:port]/"，老 config 缺键经
     # _merge_sections 向后兼容）。
+    # M-CNB（2026-10 更新分发迁移）：cnb_base=CNB 发布仓 base（元数据+下载**主源**，
+    # 读 {base}/-/git/raw/main/version.json；"" 或非法=退回 GitHub-only 旧路径）。
+    # GitHub API 降为交叉校验腿（两源冲突=不弹窗不下载）与回退腿；两源元数据均
+    # 视同 API——直连/代理可回退，**镜像永不介入**。老 config 缺键同样经合并补默认。
     "update": {"enabled": True, "repo": "WuJerry9376/token-widget", "last_check": 0,
-               "last_auto_date": "", "mirror": ""},
+               "last_auto_date": "", "mirror": "",
+               "cnb_base": "https://cnb.cool/WuJerry/rel-tokenwidget"},
 }
 
 

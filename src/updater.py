@@ -33,6 +33,31 @@ M18（镜像备用源 + SHA-256 信任锚，镜像源裁决落地）：
   镜像只救二进制，不救信任链。
 - normalize_mirror：宽进（无 scheme 补 https://、占位式「前缀/https://…」与纯
   前缀两形态统一存 "scheme://host[:port]/" 拼接式）；非法/空 → ""（不使用）。
+
+M-CNB（2026-10 更新分发迁移，CNB 主源 + GitHub 交叉校验/回退）：
+- config.update.cnb_base（默认 https://cnb.cool/WuJerry/rel-tokenwidget，""/非法=
+  退回 GitHub-only 旧路径）。check **优先** GET {base}/-/git/raw/main/version.json
+  （匿名 raw，schema-1 契约 {schema,app,version,file,size,sha256,notes,notes_url,
+  released_at}；app≠TokenWidget / schema≠1 / sha256 非 64hex / file 含路径分隔 →
+  契约校验失败=源不可信，本腿弃用）。
+- 交叉校验：CNB 成功且 repo slug 已配时尽力查一次 GitHub releases/latest
+  （短超时 CROSS_TIMEOUT，任何失败静默）。两源都可达时的冲突判定（定案 2026-10-21，
+  修正"过严"回流）：
+  ① GitHub 版本**低于** CNB → **正常**（灰度期 CNB 先发是预期状态，用 CNB 结果，
+     不判冲突、不附回退资产）；
+  ② **同版本**但 SHA-256/digest 不一致 → conflict（不弹窗不下载，面板橙字「更新源冲突」）；
+  ③ GitHub 版本**高于** CNB → conflict（现网反超属异常，保守拦截）；
+  ④ 同版本且 digest 一致（或 GitHub 未提供 digest）→ 用 CNB 并把 GitHub 资产并入
+     UpdateInfo.github_url/github_digest 作为下载回退腿。
+  GitHub 腿失败/超时/slug 空 → 用 CNB、回退腿自然缺席。
+- 下载编排 download_update()：source=cnb → 主腿 CNB 资产直链
+  {base}/-/releases/download/{tag}/{file}（urllib 自动跟随 302，错误判定天然在跟随
+  之后；302 目标有时效不可预取）；sha256 来自 version.json 且**强制校验**；
+  CNB 腿可直连/代理（复用代理开关）但**不套镜像**（cfg mirror 置空腿）。
+  主腿败 → 回退 download_and_stage 现有 GitHub 资产三级链（direct→proxy→mirror，
+  digest 规则不变）。staged-swap/触发点/频控全不动。
+- CNB base 与 api.github.com 同视 API 元数据源：normalize_cnb_base 宽进严出，
+  非法 → ""（不使用）；两源失败均如实报错（回退链最后一条的文案锁保留）。
 """
 from __future__ import annotations
 
@@ -55,6 +80,12 @@ GITHUB_API = "https://api.github.com/repos/{slug}/releases/latest"
 GITHUB_WEB = "https://github.com/"                    # M17：项目页前缀（webbrowser 用，零 API）
 UA = "token-widget/updater"                         # GitHub API 无 UA 直接 403
 TIMEOUT = 20
+# M-CNB：CNB 主源路径模板与 schema-1 契约常量（base 走配置，代码零写死仓）
+CNB_VERSION_PATH = "/-/git/raw/main/version.json"
+CNB_DOWNLOAD_PATH = "/-/releases/download/{tag}/{file}"
+CNB_APP_ID = "TokenWidget"                          # version.json app 唯一接受值
+CNB_SCHEMA = 1                                      # 契约版本（非 1=不认识，源不可信）
+CROSS_TIMEOUT = 10                                  # 交叉校验腿短超时（尽力而为）
 CHECK_INTERVAL_SECONDS = 6 * 3600                   # 定时检查频控窗口（6h）
 ASSET_NAME = "TokenWidget.exe"                      # 主匹配资源名（大小写不敏感）
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")         # M18 digest 归一判据
@@ -84,15 +115,25 @@ class UpdateInfo:
     digest: str | None = None       # M18：asset.digest "sha256:<hex64>"；无/畸形=None
     size: int = 0                   # M19：asset.size 字节（0=未知，弹窗展示 MB）
     published: str = ""             # M19：release published_at 原文（ISO8601，""=无）
+    source: str = "github"          # M-CNB："cnb"=主源命中；"github"=API/回退腿结果
+    github_url: str = ""            # M-CNB：交叉校验腿给出的 GitHub 资产直链（回退下载用；
+                                    #         GitHub 不可达/未配置 slug=""）
+    github_digest: str | None = None  # M-CNB：GitHub asset.digest（None=未提供/不可达）
 
 
 @dataclass
 class CheckResult:
-    """check() 统一返回：ok→有 info；skipped→6h 内定时检查被频控；否则 err 文案。"""
+    """check() 统一返回：ok→有 info；skipped→6h 内定时检查被频控；否则 err 文案。
+
+    M-CNB：conflict=True 表示同版本 SHA-256/digest 互斥，或 GitHub 版本反超 CNB
+    （异常态保守拦截）——调用方**不得弹窗不得下载**，只在状态行/日志标注
+    「更新源冲突」（ok 恒 False）。GitHub 落后于 CNB=灰度预期，**不是**冲突。
+    """
     ok: bool = False
     info: UpdateInfo | None = None
     err: str = ""
     skipped: bool = False
+    conflict: bool = False
 
 
 @dataclass
@@ -138,6 +179,36 @@ def repo_url(repo) -> str:
     """M17：由 slug（或原始 repo 串）派生项目页 URL；非法/空 → ""。零网络。"""
     slug = parse_repo(repo)
     return GITHUB_WEB + slug if slug else ""
+
+
+def normalize_cnb_base(s) -> str:
+    """M-CNB：CNB 发布仓 base → "scheme://host[:port]/path"（去尾 /）；空/非法 → ""（不使用）。
+
+    宽进（无 scheme 补 https://）严出：仅 http(s)、拒绝 userinfo（不携带凭据）、
+    端口越界/畸形 host 拒绝；查询/片段丢弃。**视同 API 元数据源**——与
+    api.github.com 同档：可直连/代理，镜像永不介入。"""
+    if not isinstance(s, str):
+        return ""
+    t = s.strip()
+    if not t:
+        return ""
+    if "://" not in t:
+        t = "https://" + t
+    try:
+        p = urllib.parse.urlsplit(t)
+        port = p.port                                 # 非数字/越界 → ValueError
+    except ValueError:
+        return ""
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https") or not p.hostname:
+        return ""
+    if p.username is not None or p.password is not None:
+        return ""
+    if not re.fullmatch(r"[\w.\\-]+|\[[0-9a-fA-F:]+]", p.hostname):
+        return ""
+    host = f"{p.hostname}:{port}" if port else p.hostname
+    path = p.path.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    return f"{scheme}://{host}{path}"
 
 
 def _ver_tuple(v) -> tuple[int, int, int]:
@@ -216,12 +287,57 @@ def parse_release(j) -> tuple[str, str, str, str | None, int, str]:
             pub if isinstance(pub, str) else "")
 
 
-def _req(url: str, headers: dict, opener=None) -> tuple[int, dict, bytes]:
-    """GET 传输层（测试 monkeypatch 注入点）。返回 (status, headers-dict, body)。"""
+def parse_version_json(j) -> tuple[dict | None, str]:
+    """M-CNB：CNB version.json（schema-1 契约）校验 → (字段 dict, "") 或 (None, 错误文案)。
+
+    必严：schema==1、app=="TokenWidget"、version 非空、file 为裸文件名（拒绝
+    "/"、"\\"、".."路径注入）、sha256 归一后 64hex（容忍 "sha256:" 前缀）。
+    任何不符 = 源不可信 → (None, 文案)，check() 据此弃用本腿（GitHub 可达则回退）。
+    宽容：size 非 int → 0；notes/notes_url/released_at 非 str → ""（展示端容错）。
+    返回 dict 含 tag（version 原文，下载路径用——release tag 可能带 v 前缀）与
+    version（去 v 后三段比较用）。永不抛。
+    """
+    if not isinstance(j, dict):
+        return None, "CNB version.json 非 JSON 对象（源不可信）"
+    if j.get("schema") != CNB_SCHEMA:
+        return None, f"CNB version.json schema 非 {CNB_SCHEMA}（契约不认识，源不可信）"
+    if str(j.get("app") or "").strip() != CNB_APP_ID:
+        return None, "CNB version.json app 不匹配（非 TokenWidget，源不可信）"
+    raw = j.get("version")
+    if not (isinstance(raw, str) and raw.strip()):
+        return None, "CNB version.json version 缺失/非法（源不可信）"
+    raw = raw.strip()
+    ver = raw[1:] if raw[:1] in ("v", "V") else raw
+    f = j.get("file")
+    if not (isinstance(f, str) and f.strip()) or any(
+            bad in f for bad in ("/", "\\", "..")):
+        return None, "CNB version.json file 非法（含路径分隔，源不可信）"
+    sh = j.get("sha256")
+    t = sh.strip().lower() if isinstance(sh, str) else ""
+    if t.startswith("sha256:"):
+        t = t.split(":", 1)[1].strip()
+    if not _SHA256_HEX.fullmatch(t):
+        return None, "CNB version.json sha256 非 64hex（源不可信）"
+    sz = j.get("size")
+
+    def _s(x):
+        return x if isinstance(x, str) else ""
+
+    return ({"version": ver, "tag": raw, "file": f.strip(), "sha256": t,
+             "size": sz if isinstance(sz, int) and not isinstance(sz, bool) else 0,
+             "notes": _s(j.get("notes")), "notes_url": _s(j.get("notes_url")),
+             "released_at": _s(j.get("released_at"))}, "")
+
+
+def _req(url: str, headers: dict, opener=None, timeout=None) -> tuple[int, dict, bytes]:
+    """GET 传输层（测试 monkeypatch 注入点）。返回 (status, headers-dict, body)。
+
+    M-CNB：timeout=None → 默认 TIMEOUT（20s）；交叉校验腿传短超时。302 由
+    urllib 默认策略自动跟随——HTTP 状态判定的天然是**跟随之后**的最终响应。"""
     r = urllib.request.Request(url, headers=headers, method="GET")
     target = opener if opener is not None else urllib.request.build_opener()
     try:
-        with target.open(r, timeout=TIMEOUT) as resp:
+        with target.open(r, timeout=timeout or TIMEOUT) as resp:
             hd = {k.lower(): v for k, v in resp.headers.items()}
             return int(getattr(resp, "status", 200) or 200), hd, resp.read()
     except urllib.error.HTTPError as e:
@@ -233,39 +349,38 @@ def _headers() -> dict:
     return {"User-Agent": UA, "Accept": "application/vnd.github+json"}
 
 
-def check(cfg: dict, force: bool = False, now: float | None = None,
-          req=None) -> CheckResult:
-    """检查 releases/latest。req 参数供测试注入传输层（默认模块 _req）。
+def _json_headers() -> dict:
+    return {"User-Agent": UA, "Accept": "application/json"}
 
-    频控：非 force 且距 last_check <6h → skipped（零网络）。
-    代理回落：默认直连；失败且 network.proxy_enabled+URL 合法 → 经代理重试一次。
-    M18：**本函数永不走镜像**（api.github.com 是信任锚，镜像只救二进制下载；
-    元数据失败如实报错，不做第三方中转）。
-    """
-    sec = _section(cfg)
-    slug = parse_repo(sec.get("repo"))
-    if not slug:
-        return CheckResult(err="未配置仓库：请在 local\\config.json 的 update.repo 填入 owner/name")
-    t = time.time() if now is None else float(now)
-    if not force:
-        try:
-            last = float(sec.get("last_check") or 0)
-        except (TypeError, ValueError):
-            last = 0.0
-        if t - last < CHECK_INTERVAL_SECONDS:
-            return CheckResult(skipped=True)
-    reqf = req if req is not None else _req
+
+def _api_get(reqf, url: str, headers: dict, opener, timeout=None):
+    """check 腿传输接缝：timeout=None 时保持旧三参调用形（老桩/注入方零改动）。"""
+    if timeout is None:
+        return reqf(url, headers, opener)
+    return reqf(url, headers, opener, timeout=timeout)
+
+
+def _api_attempts(cfg) -> list:
+    """元数据腿 opener 序：①直连 ②代理开启+合法则回落重试一次。
+
+    **GitHub 与 CNB 两源同档**（API 元数据，镜像永不介入——镜像只救二进制）。
+    cfg=None/非 dict → 只有直连。"""
+    attempts: list = [None]
+    net = _config_net(cfg)
+    proxy = netconfig.normalize_proxy_url(net.get("proxy_url"))
+    if proxy and net.get("proxy_enabled"):
+        attempts.append(netconfig.build_opener(proxy))
+    return attempts
+
+
+def _gh_check(slug: str, reqf, attempts: list, timeout=None) -> CheckResult:
+    """GitHub releases/latest 一轮检查（原 check() 主体，**文案锁**：错误字样被
+    既有测试断言，禁改）。HTTP/解析错立即返回（不换位重试）；仅网络异常续腿。"""
     url = GITHUB_API.format(slug=slug)
-    attempts: list = [None]                            # ① 直连
-    proxy = netconfig.normalize_proxy_url(
-        (_config_net(cfg) or {}).get("proxy_url"))
-    fallback_ok = bool(proxy) and bool((_config_net(cfg) or {}).get("proxy_enabled"))
-    if fallback_ok:
-        attempts.append(netconfig.build_opener(proxy))  # ② 仅直连失败后重试一次
     err = ""
-    for i, opener in enumerate(attempts):
+    for opener in attempts:
         try:
-            st, _hd, body = reqf(url, _headers(), opener)
+            st, _hd, body = _api_get(reqf, url, _headers(), opener, timeout)
         except (urllib.error.URLError, OSError, ValueError) as e:
             err = netconfig.sanitize_proxy_msg(
                 f"网络错误：{str(getattr(e, 'reason', e))[:120]}")
@@ -281,8 +396,109 @@ def check(cfg: dict, force: bool = False, now: float | None = None,
             return CheckResult(err="响应缺少 tag_name（仓库无 release？）")
         return CheckResult(ok=True, info=UpdateInfo(version=ver, url=dl, notes=notes,
                                                     digest=digest, size=size,
-                                                    published=pub))
-    return CheckResult(err=err + ("（直连与代理均失败）" if fallback_ok else "（直连失败）"))
+                                                    published=pub, source="github"))
+    suffix = "（直连与代理均失败）" if len(attempts) > 1 else "（直连失败）"
+    return CheckResult(err=err + suffix)
+
+
+def _cnb_check(cnb: str, reqf, attempts: list, timeout=None):
+    """M-CNB 主源腿：GET {base}/-/git/raw/main/version.json → (UpdateInfo|None, err)。
+
+    契约校验失败=源不可信（(None, 文案)，本腿弃用）；网络异常续下一腿；HTTP≠200
+    或非 JSON 直接定论（与 GitHub 腿语义一致）。digest 恒为 "sha256:<hex64>"
+    （parse_version_json 已强制 64hex）。"""
+    url = cnb + CNB_VERSION_PATH
+    err = ""
+    for opener in attempts:
+        try:
+            st, _hd, body = _api_get(reqf, url, _json_headers(), opener, timeout)
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            err = netconfig.sanitize_proxy_msg(
+                f"网络错误：{str(getattr(e, 'reason', e))[:120]}")
+            continue
+        if st != 200:
+            return None, f"CNB 返回 HTTP {st}（稍后再试）"
+        try:
+            j = json.loads(body)
+        except ValueError:
+            return None, "CNB version.json 响应非 JSON"
+        vj, perr = parse_version_json(j)
+        if vj is None:
+            return None, perr
+        info = UpdateInfo(version=vj["version"],
+                          url=cnb + CNB_DOWNLOAD_PATH.format(
+                              tag=vj["tag"], file=urllib.parse.quote(vj["file"])),
+                          notes=vj["notes"], digest=f"sha256:{vj['sha256']}",
+                          size=vj["size"], published=vj["released_at"], source="cnb")
+        return info, ""
+    return None, err + ("（直连与代理均失败）" if len(attempts) > 1 else "（直连失败）")
+
+
+def check(cfg: dict, force: bool = False, now: float | None = None,
+          req=None) -> CheckResult:
+    """M-CNB 双源检查：CNB 第一优先，GitHub 交叉校验 + 回退。req 供测试注入传输层。
+
+    决策表（详见模块头；冲突判定 2026-10-21 定案，修正"过严"回流）：
+    - 频控/触发点语义不变：非 force 且距 last_check <6h → skipped（零网络）。
+    - CNB 可达且 GitHub 可达：
+      ① GitHub 版本**低于** CNB → 正常用 CNB（灰度期 CNB 先发=预期，不判冲突、
+        **不附**回退资产——github_url/github_digest 仅同版可比时给出）；
+      ② 同版本但 SHA-256/digest 不一致 → conflict（不弹窗不下载）；
+      ③ GitHub 版本**高于** CNB → conflict（现网反超=异常，保守拦截）；
+      ④ 同版本且 digest 一致（或 GitHub 无 digest）→ 用 CNB 并附
+        info.github_url/github_digest 回退资产。
+    - CNB 可达、GitHub 不可达/未配置 slug：用 CNB（回退腿自然缺席）。
+    - CNB 不可达/契约失败：完全退回现 GitHub 路径（老行为、老文案）。
+    - 两源都配不了（cnb 空且 slug 空）：未配置文案（老 u7 断言）。
+    - GitHub 交叉腿尽力而为：短超时（CROSS_TIMEOUT），任何失败静默不阻断。
+    - 两源元数据**永不走镜像**（信任链纪律）；代理开关对两源同档可回落。
+    """
+    sec = _section(cfg)
+    slug = parse_repo(sec.get("repo"))
+    cnb = normalize_cnb_base(sec.get("cnb_base"))
+    if not slug and not cnb:
+        return CheckResult(err="未配置仓库：请在 local\\config.json 的 update.repo 填入 owner/name")
+    t = time.time() if now is None else float(now)
+    if not force:
+        try:
+            last = float(sec.get("last_check") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if t - last < CHECK_INTERVAL_SECONDS:
+            return CheckResult(skipped=True)
+    reqf = req if req is not None else _req
+    attempts = _api_attempts(cfg)
+    cnb_info: UpdateInfo | None = None
+    cnb_err = ""
+    if cnb:
+        cnb_info, cnb_err = _cnb_check(cnb, reqf, attempts)
+    if cnb_info is not None:
+        if slug:                                    # 交叉校验腿（尽力而为）
+            try:
+                gh = _gh_check(slug, reqf, attempts, timeout=CROSS_TIMEOUT)
+            except Exception:                       # noqa: BLE001 桩/传输意外=不可达
+                gh = CheckResult()
+            if gh.ok and gh.info is not None and gh.info.version:
+                ghv, cnv = _ver_tuple(gh.info.version), _ver_tuple(cnb_info.version)
+                if ghv > cnv:                         # ③ 反超=异常，保守拦截
+                    return CheckResult(
+                        conflict=True,
+                        err=f"更新源冲突：GitHub v{gh.info.version} 反超 CNB "
+                            f"v{cnb_info.version}（异常态，不弹窗、不下载）")
+                if ghv < cnv:                         # ① 灰度期 CNB 先发=预期
+                    pass                              #   用 CNB；不附回退资产、不比哈希
+                else:                                 # 同版：②/④
+                    if gh.info.digest and gh.info.digest != cnb_info.digest:
+                        return CheckResult(
+                            conflict=True,
+                            err=f"更新源冲突：两源 v{cnb_info.version} 一致但 SHA-256 "
+                                "校验值互斥（不弹窗、不下载）")
+                    cnb_info.github_url = gh.info.url
+                    cnb_info.github_digest = gh.info.digest
+        return CheckResult(ok=True, info=cnb_info)
+    if not slug:                                    # CNB 唯一源且失败 → 如实报错
+        return CheckResult(err=cnb_err)
+    return _gh_check(slug, reqf, attempts)          # 兜底：完全退回现 GitHub 路径
 
 
 def _section(cfg: dict) -> dict:
@@ -529,6 +745,56 @@ def download_and_stage(url: str, cfg: dict | None = None, digest: str | None = N
             continue
     suffix = "" if len(tried) <= 1 else f"（{'→'.join(tried)} 全部失败）"
     return DownloadResult(err=(last_err or "下载失败") + suffix)
+
+
+def _cfg_no_mirror(cfg):
+    """M-CNB：复制 cfg 并把 update.mirror 置空（CNB 主腿不套镜像——第三方前缀
+    只救 GitHub 二进制回退腿；代理开关保留）。cfg 非 dict 原样返回。"""
+    if not isinstance(cfg, dict):
+        return cfg
+    sec = dict(_section(cfg))
+    sec["mirror"] = ""
+    return {**cfg, "update": sec}
+
+
+def download_update(info: UpdateInfo, cfg: dict | None = None,
+                    dest_dir: Path | str | None = None, req_open=None,
+                    progress_cb=None, chunk: int = 65536) -> DownloadResult:
+    """M-CNB 下载编排（设置页弹窗唯一入口）；staged-swap/触发点/频控零改动。
+
+    - source="cnb"：主腿 = CNB 资产直链（{base}/-/releases/download/{tag}/{file}，
+      urllib 自动跟随 302 → 错误判定天然在跟随后；HTTP≠200/缺 CL/长度不符均败该腿）。
+      **SHA-256 恒来自 version.json 强校验**（info.digest 缺失直接拒收）。
+      可直连/代理（复用开关），不套镜像（_cfg_no_mirror）。成功后 channel
+      前缀 "cnb-"（cnb-direct/cnb-proxy）。
+    - 主腿败且交叉校验腿给过 github_url → 回退 download_and_stage 现三级链
+      （direct→proxy→mirror，digest=GitHub asset.digest，缺哈希镜像拒收等 M18
+      规则全保留）；回退成功 note 追加换腿审计。两腿全败 err 合并（截断脱敏）。
+    - 其他 source（含旧裸 UpdateInfo）：直通 download_and_stage（现行为逐字节不变）。
+    """
+    if getattr(info, "source", "github") != "cnb":
+        return download_and_stage(info.url, cfg=cfg, digest=info.digest,
+                                  dest_dir=dest_dir, req_open=req_open,
+                                  progress_cb=progress_cb, chunk=chunk)
+    if not info.digest:                             # 防御：契约在 parse 已保证，双保险
+        return DownloadResult(err="CNB 下载缺少 SHA-256 校验值（version.json 契约失效，拒收）")
+    r = download_and_stage(info.url, cfg=_cfg_no_mirror(cfg), digest=info.digest,
+                           dest_dir=dest_dir, req_open=req_open,
+                           progress_cb=progress_cb, chunk=chunk)
+    if not r.err:
+        r.channel = f"cnb-{r.channel}"
+        return r
+    gh_url = getattr(info, "github_url", "") or ""
+    if not gh_url:                                  # 交叉腿不可达：无回退资产，如实报
+        return r
+    r2 = download_and_stage(gh_url, cfg=cfg,
+                            digest=getattr(info, "github_digest", None),
+                            dest_dir=dest_dir, req_open=req_open,
+                            progress_cb=progress_cb, chunk=chunk)
+    if not r2.err:
+        r2.note = ((r2.note + "；") if r2.note else "") + "CNB 腿失败，已改用 GitHub 资产"
+        return r2
+    return DownloadResult(err=f"CNB 腿：{r.err[:80]} | GitHub 腿：{r2.err[:80]}")
 
 
 def probe_replace_permission(exe_path: Path | str | None = None) -> bool:

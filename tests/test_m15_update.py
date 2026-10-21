@@ -30,6 +30,15 @@ u23 FAILED 样本换 swap_failed 文案。
 M28b 增补（v1.9.2 事故修）：u16 ①改断言为 **copy+原子就位**（改名自身禁回流，
 staged .new 留位）；u32~u36 接力五态（handed 交棒/早死重拉/双败 launch_failed
 不退出不 brick/spawn 异常归 launch_failed/copy 败回滚正名+marker 清）。
+M-CNB 增补（2026-10 更新分发迁移）：u37 CNB 主源发现+交叉校验腿（URL/短超时/
+回退资产附挂）；u38 两源冲突三态+交叉腿静默失败；u39 CNB 不可达/404/契约坏
+→ 完整回退现 GitHub 路径（老文案）+非法 base=零回归；u40 version.json schema-1
+契约逐项拒绝（源不可信）与 normalize_cnb_base 严出；u41 download_update 编排
+（cnb-direct 不套镜像/404 跟随后定论换腿/双败合并/缺哈希拒收/github 源直通）。
+契约样本（默认 sha 对 b"CNB-BODY"）。桩侧：CFG.update.cnb_base=""（旧案例零回归）；
+RecReq/blocked_req 加 timeout 形参并记录 timeouts（主腿=None，交叉腿=CROSS_TIMEOUT）。
+冲突判定修正（2026-10-21 定案，遗留风险1）：u38 改为同版 digest 互斥/缺哈希放行/
+交叉腿静默；u42 新增 GitHub 落后=正常用 CNB 不附回退资产、GitHub 反超=conflict。
 """
 from __future__ import annotations
 
@@ -64,33 +73,50 @@ CFG = {"poll_seconds": 300, "low_yellow_pct": 0.15, "low_red_pct": 0.05,
        "opencode_go": {"auto_detect": True},
        "network": {"proxy_enabled": False, "proxy_url": "",
                    "proxy_targets": ["opencode_go", "codex"]},
-       "update": {"enabled": True, "repo": "fake-owner/fake-repo",
-                  "last_check": int(_now) - 999999,
-                  "last_auto_date": time.strftime("%Y-%m-%d"),
-                  "mirror": ""}}   # 当日=已消费，tick 不野触发；M18 mirror 默认不使用
+        "update": {"enabled": True, "repo": "fake-owner/fake-repo",
+                   "last_check": int(_now) - 999999,
+                   "last_auto_date": time.strftime("%Y-%m-%d"),
+                   "mirror": "", "cnb_base": ""}}   # 当日=已消费，tick 不野触发；
+# M-CNB：桩基线 cnb_base=""（GitHub-only 旧路径零回归）；CNB 案例经 cfg_with 显式注入假 base。
+
+CNB = "https://cnb.example/rel-tokenwidget"          # M-CNB 假 CNB base（零真实域名）
 
 
 def cfg_with(**upd) -> dict:
     return {**CFG, "update": {**CFG["update"], **upd}}
 
 
+def vj_body(version="v9.9.9", file="TokenWidget.exe", sha=None, schema=1,
+            app="TokenWidget", size=11263948, notes="cnb notes",
+            released="2026-10-20T08:00:00Z") -> bytes:
+    """M-CNB：schema-1 version.json 契约样本（默认 sha 对 b"CNB-BODY"）。"""
+    h = sha if sha is not None else hashlib.sha256(b"CNB-BODY").hexdigest()
+    return json.dumps({"schema": schema, "app": app, "version": version,
+                       "file": file, "size": size, "sha256": h, "notes": notes,
+                       "notes_url": CNB + "/-/releases/" + version,
+                       "released_at": released}).encode()
+
+
 _net: list[str] = []
 
 
-def blocked_req(url, headers, opener=None):
+def blocked_req(url, headers, opener=None, timeout=None):
     _net.append(str(url)[:80])
     raise AssertionError("真实网络请求被拦截（测试违规）")
 
 
 class RecReq:
-    """check 传输层桩：按脚本返回 (status, hdrs, body) 或抛异常；记录 (url, headers, opener)。"""
+    """check 传输层桩：按脚本返回 (status, hdrs, body) 或抛异常；记录 (url, headers, opener)
+    与 timeouts（M-CNB：主腿 timeout=None，交叉校验腿=CROSS_TIMEOUT）。"""
 
     def __init__(self, script):
         self.script = list(script)
         self.calls: list[tuple[str, dict, object]] = []
+        self.timeouts: list = []
 
-    def __call__(self, url, headers, opener=None):
+    def __call__(self, url, headers, opener=None, timeout=None):
         self.calls.append((url, dict(headers), opener))
+        self.timeouts.append(timeout)
         r = self.script.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -800,7 +826,7 @@ def u20_panel_render_and_toggle(app, root) -> str:
     assert any("未配置" in t for t in texts), "空 repo → 源未配置提示（零网络）"
     # M18：镜像源行渲染 + 信任链注记
     assert any(t == "镜像源（可选）" for t in texts), "镜像 Entry 行标签"
-    assert any("版本信息始终来自 GitHub 官方 API" in t for t in texts), "FAINT 注记"
+    assert any("镜像永不介入" in t for t in texts), "FAINT 注记（M-CNB 文案同步）"
     assert panel.ent_mirror.winfo_manager() != "", "Entry 在位"
     assert panel.var_up_auto.get() is True, "DEFAULTS enabled=True"
     panel.var_up_auto.set(False)
@@ -1029,7 +1055,7 @@ def u25_skipped_text_lock(app, root) -> str:
     clear_cfg(repo="fake-owner/fake-repo", enabled=True, last_check=int(now - 600))
     calls: list = []
 
-    def bump(url, headers, opener=None):
+    def bump(url, headers, opener=None, timeout=None):
         calls.append(url)
         raise AssertionError("频控命中不应触网")
     orig_req = up._req
@@ -1381,6 +1407,228 @@ def u31_dialog_helpers() -> str:
     return "published 容错/size MB 一位小数/notes 六行截断软换行/空说明占位"
 
 
+# ------------------------------------------------- M-CNB（CNB 主源+交叉校验）----
+
+def u37_cnb_primary_discovery() -> str:
+    """CNB 主源发现：URL/头/字段映射/下载路径用 tag 原文；交叉腿官方 API 短超时
+    且一致时附回退资产（github_url/github_digest）。"""
+    rec = RecReq([(200, {}, vj_body())])
+    r = up.check(cfg_with(cnb_base=CNB, repo=""), req=rec, now=_now)   # 无 slug=仅 CNB 腿
+    assert r.ok and r.info.source == "cnb" and r.info.version == "9.9.9", r
+    assert rec.calls[0][0] == CNB + up.CNB_VERSION_PATH, rec.calls[0][0]
+    assert rec.calls[0][1]["User-Agent"] == up.UA and rec.calls[0][1]["Accept"] \
+        == "application/json", "UA 固定 + JSON Accept"
+    assert rec.timeouts[0] is None, "主腿默认超时"
+    assert r.info.url == CNB + "/-/releases/download/v9.9.9/TokenWidget.exe", \
+        "下载路径用 version 原文 tag（带 v）"
+    assert r.info.digest == "sha256:" + hashlib.sha256(b"CNB-BODY").hexdigest()
+    assert r.info.size == 11263948 and r.info.published == "2026-10-20T08:00:00Z"
+    assert r.info.notes == "cnb notes" and r.info.github_url == "", "未交叉=无回退资产"
+    h = hashlib.sha256(b"CNB-BODY").hexdigest()
+    rec2 = RecReq([(200, {}, vj_body()), (200, {}, rel_body("v9.9.9", digest="sha256:" + h))])
+    r2 = up.check(cfg_with(cnb_base=CNB), req=rec2, now=_now)
+    assert r2.ok and r2.info.source == "cnb", r2
+    assert rec2.calls[1][0] == up.GITHUB_API.format(slug="fake-owner/fake-repo"), \
+        "交叉腿恒走官方 API（永不套镜像）"
+    assert rec2.timeouts[1] == up.CROSS_TIMEOUT, "交叉腿短超时"
+    assert r2.info.github_url == "https://dl.example/TokenWidget.exe" \
+        and r2.info.github_digest == "sha256:" + h, "回退资产附挂"
+    # 频控语义不变：CNB 同样在 6h 窗内 skipped（零网络）
+    rec3 = RecReq([])
+    r3 = up.check(cfg_with(cnb_base=CNB, last_check=int(_now) - 3600), req=rec3, now=_now)
+    assert r3.skipped and rec3.calls == [], "频控在触网前，两源同窗"
+    return "主源发现字段映射/tag 原文/交叉腿 URL·短超时·回退资产/频控不变"
+
+
+def u38_cnb_github_conflict() -> str:
+    """两源都可达（2026-10-21 冲突判定定案）：同版 digest 互斥→conflict；GitHub 缺
+    digest 不比哈希放行附回退资产；交叉腿任何失败静默（CNB 结果照常）。
+    （版本低于/反超两态见 u42。）"""
+    rec = RecReq([(200, {}, vj_body("v9.9.9", sha="11" * 32)),
+                  (200, {}, rel_body("v9.9.9", digest="sha256:" + "22" * 32))])
+    r = up.check(cfg_with(cnb_base=CNB), req=rec, now=_now)
+    assert not r.ok and r.conflict and r.info is None and "更新源冲突" in r.err \
+        and "SHA-256" in r.err, r
+    rec3 = RecReq([(200, {}, vj_body("v9.9.9")), (200, {}, rel_body("v9.9.9"))])  # 无 digest
+    r3 = up.check(cfg_with(cnb_base=CNB), req=rec3, now=_now)
+    assert r3.ok and r3.info.github_digest is None \
+        and r3.info.github_url.endswith("TokenWidget.exe"), r3
+    rec4 = RecReq([(200, {}, vj_body("v9.9.9")), urllib.error.URLError("gh down")])
+    r4 = up.check(cfg_with(cnb_base=CNB), req=rec4, now=_now)
+    assert r4.ok and r4.info.source == "cnb" and r4.info.github_url == "", \
+        "交叉腿网络炸=静默，用可达源（CNB）"
+    rec5 = RecReq([(200, {}, vj_body("v9.9.9")), (503, {}, b"down")])
+    r5 = up.check(cfg_with(cnb_base=CNB), req=rec5, now=_now)
+    assert r5.ok and r5.info.source == "cnb", "交叉腿 HTTP 错也静默"
+    return "同版digest互斥conflict/GitHub缺哈希放行/交叉腿静默四态"
+
+
+def u42_github_lag_and_ahead() -> str:
+    """冲突判定修正回流（遗留风险1 定案）：GitHub **低于** CNB=灰度预期，正常用
+    CNB 且**不附**回退资产；GitHub **反超** CNB=异常，conflict 保守拦截。"""
+    h = hashlib.sha256(b"CNB-BODY").hexdigest()
+    # ① 落后：8.8.8 < 9.9.9 → 不判冲突、github_url/digest 缺席（不比哈希）
+    rec = RecReq([(200, {}, vj_body("v9.9.9")),
+                  (200, {}, rel_body("v8.8.8", digest="sha256:" + "11" * 32))])
+    r = up.check(cfg_with(cnb_base=CNB), req=rec, now=_now)
+    assert r.ok and not r.conflict and r.info.source == "cnb" \
+        and r.info.version == "9.9.9", r
+    assert r.info.github_url == "" and r.info.github_digest is None, \
+        "落后=无回退资产（仅同版可比时附挂）"
+    assert not r.conflict and "冲突" not in r.err, r
+    # ③ 反超：9.9.10 > 9.9.9 → conflict（数字位比较，非字符串）
+    rec2 = RecReq([(200, {}, vj_body("v9.9.9")), (200, {}, rel_body("v9.9.10"))])
+    r2 = up.check(cfg_with(cnb_base=CNB), req=rec2, now=_now)
+    assert not r2.ok and r2.conflict and r2.info is None \
+        and "更新源冲突" in r2.err and "反超" in r2.err \
+        and "9.9.10" in r2.err and "9.9.9" in r2.err, r2
+    # 反超即便哈希同值也拦（版本序异常本身就是信号）
+    rec3 = RecReq([(200, {}, vj_body("v9.9.9")),
+                   (200, {}, rel_body("v9.9.10", digest="sha256:" + h))])
+    r3 = up.check(cfg_with(cnb_base=CNB), req=rec3, now=_now)
+    assert r3.conflict, r3
+    # 同版仍正常附回退资产（对照 ①：规则切换不误伤 ④）
+    rec4 = RecReq([(200, {}, vj_body("v9.9.9")),
+                   (200, {}, rel_body("v9.9.9", digest="sha256:" + h))])
+    r4 = up.check(cfg_with(cnb_base=CNB), req=rec4, now=_now)
+    assert r4.ok and r4.info.github_digest == "sha256:" + h \
+        and r4.info.github_url.endswith("TokenWidget.exe"), r4
+    # CNB 落后场景下走 GitHub 主路径不受影响（CNB 腿坏 → 回退腿照常给旧版）
+    rec5 = RecReq([(200, {}, vj_body("v1.0.0")), (200, {}, rel_body("v9.9.9"))])
+    r5 = up.check(cfg_with(cnb_base=CNB), req=rec5, now=_now)
+    assert r5.conflict, "CNB 极旧+GitHub 新=反超异常，同样拦截（保守）"
+    return "GitHub落后=正常用CNB无回退/反超=conflict/同版对照附资产"
+
+
+def u39_cnb_unreachable_fallback_github() -> str:
+    """CNB 不可达/404/契约坏 → 完全退回现 GitHub 路径（老行为老文案）；
+    CNB 唯一源时如实报错；cnb_base 空/非法 → 零回归不触 CNB。"""
+    refuse = urllib.error.URLError("cnb down")
+    cfg = cfg_with(cnb_base=CNB)
+    cfg["network"] = {**CFG["network"], "proxy_enabled": True, "proxy_url": PX}
+    rec = RecReq([refuse, refuse,
+                  (200, {}, rel_body("v9.9.9", digest="sha256:" + "33" * 32))])
+    r = up.check(cfg, req=rec, now=_now)
+    assert r.ok and r.info.source == "github", r
+    assert [c[0] for c in rec.calls] == [CNB + up.CNB_VERSION_PATH,
+                                         CNB + up.CNB_VERSION_PATH,
+                                         up.GITHUB_API.format(slug="fake-owner/fake-repo")], \
+        "CNB 直连+代理两腿败后才回 GitHub（代理开关两源同档）"
+    assert isinstance(rec.calls[1][2], urllib.request.OpenerDirector), "CNB 腿经代理"
+    rec2 = RecReq([(404, {}, b""), (200, {}, rel_body("v9.9.9"))])
+    r2 = up.check(cfg_with(cnb_base=CNB), req=rec2, now=_now)
+    assert r2.ok and r2.info.source == "github" and len(rec2.calls) == 2, r2
+    rec3 = RecReq([(200, {}, vj_body(app="EvilWidget")), (200, {}, rel_body("v9.9.9"))])
+    r3 = up.check(cfg_with(cnb_base=CNB), req=rec3, now=_now)
+    assert r3.ok and r3.info.source == "github" and len(rec3.calls) == 2, \
+        "契约不符=源不可信，本腿弃用（不重试）"
+    rec4 = RecReq([urllib.error.URLError("cnb down")])
+    r4 = up.check(cfg_with(cnb_base=CNB, repo=""), req=rec4, now=_now)
+    assert not r4.ok and "cnb down" in r4.err and "GitHub" not in r4.err, r4
+    rec5 = RecReq([(200, {}, rel_body("v9.9.9"))])
+    r5 = up.check(cfg_with(cnb_base="not a url!!"), req=rec5, now=_now)
+    assert r5.ok and r5.info.source == "github" and len(rec5.calls) == 1, \
+        "非法 base=CNB 不使用，旧 GitHub-only 行为"
+    return "CNB 双腿败/404/契约坏→回退 GitHub；唯一源如实报错；非法 base 零回归"
+
+
+def u40_version_json_contract() -> str:
+    """schema-1 契约逐项校验（源不可信拒绝）+ normalize_cnb_base 宽进严出。"""
+    pv = up.parse_version_json
+    h = hashlib.sha256(b"x").hexdigest()
+    good = {"schema": 1, "app": "TokenWidget", "version": "v1.11.0",
+            "file": "TokenWidget.exe", "size": 11263948, "sha256": h,
+            "notes": "n", "notes_url": "u", "released_at": "t"}
+    v, err = pv(good)
+    assert v is not None and err == "" and v["version"] == "1.11.0" \
+        and v["tag"] == "v1.11.0", (v, err)
+    assert pv({**good, "sha256": "sha256:" + h.upper()})[0]["sha256"] == h, "前缀容忍归一"
+    assert pv({**good, "version": "1.11.0"})[0]["tag"] == "1.11.0", "无 v 原样"
+    bad_cases = [({**good, "schema": 2}, "schema"), ({**good, "schema": "1"}, "schema"),
+                 ({**good, "app": "OtherWidget"}, "app"), ({**good, "app": None}, "app"),
+                 ({**good, "sha256": "zz"}, "sha256"),
+                 ({**good, "sha256": "md5:" + h}, "sha256"),
+                 ({**good, "file": "a/../b.exe"}, "file"),
+                 ({**good, "file": "win\\x.exe"}, "file"),
+                 ({**good, "file": "sub/dir/x.exe"}, "file"),
+                 ({**good, "version": "  "}, "version"),
+                 ({**good, "version": 123}, "version"),
+                 ("not-dict", "非 JSON 对象"), ({}, "")]
+    for bad, key in bad_cases:
+        v2, e2 = pv(bad)
+        assert v2 is None and e2 and key in e2, (bad, e2)
+    assert pv({**good, "size": "big"})[0]["size"] == 0, "宽容字段：size 非 int→0"
+    assert pv({**good, "notes": None})[0]["notes"] == ""
+    nm = up.normalize_cnb_base
+    assert nm("cnb.cool/o/r") == "https://cnb.cool/o/r", "无 scheme 补 https"
+    assert nm("https://cnb.cool/o/r/") == "https://cnb.cool/o/r", "去尾 /"
+    assert nm("http://127.0.0.1:8080/rel") == "http://127.0.0.1:8080/rel"
+    for bad in ("", None, "  ", "https://user:pw@cnb.cool/o", "socks5://cnb.cool/o",
+                "https://cnb.cool:o/o", "https:///nohost"):
+        assert nm(bad) == "", bad
+    return "契约十二拒+宽容两态+base 归一/拒绝"
+
+
+def u41_download_update_chain() -> str:
+    """download_update 编排：CNB 主腿成功（不套镜像）/404（跟随后）换 GitHub 三级链/
+    双败合并/无回退资产如实报/github 源直通（旧行为）/缺 digest 拒收零网络。"""
+    d = config_mod.LOCAL_DIR / "update"
+    body = b"CNB-BODY"
+    good = "sha256:" + hashlib.sha256(body).hexdigest()
+    info = up.UpdateInfo(version="9.9.9",
+                         url=CNB + "/-/releases/download/v9.9.9/TokenWidget.exe",
+                         digest=good, source="cnb",
+                         github_url="https://dl.example/TokenWidget.exe",
+                         github_digest=good)
+
+    def wipe():
+        for f in (d / up.NEW_EXE_NAME, d / (up.NEW_EXE_NAME + ".part")):
+            if f.exists():
+                f.unlink()
+
+    # ① CNB 主腿成：channel=cnb-direct；镜像已配也**不介入**（URL 无前缀）
+    wipe()
+    cfg = cfg_with(mirror="https://ghfast.top/")
+    ctx = FakeCtx(FakeResp([body], cl=len(body)))
+    r = up.download_update(info, cfg=cfg, dest_dir=d, req_open=ctx.open)
+    assert r.err == "" and r.channel == "cnb-direct" and r.path.read_bytes() == body, r
+    assert [c[0] for c in ctx.calls] == [info.url], "CNB 腿永不套镜像前缀"
+    # ② 主腿 HTTP 404（302 跟随后判定）→ 回退 GitHub 三级链（直连腿成），note 换腿审计
+    wipe()
+    ctx2 = FakeCtx([FakeResp([], cl=None, status=404), FakeResp([body], cl=len(body))])
+    r2 = up.download_update(info, cfg=cfg, dest_dir=d, req_open=ctx2.open)
+    assert r2.err == "" and r2.channel == "direct" and "已改用 GitHub 资产" in r2.note, r2
+    assert [c[0] for c in ctx2.calls] == [info.url, info.github_url]
+    # ③ sha256 不符：CNB 腿拒收 → GitHub 腿（镜像腿字节也篡改）→ 双败合并、零残留
+    wipe()
+    badbody = b"X" * len(body)
+    ctx3 = FakeCtx([FakeResp([badbody], cl=len(badbody)),
+                    urllib.error.URLError("gh direct down"),
+                    FakeResp([badbody], cl=len(badbody))])
+    r3 = up.download_update(info, cfg=cfg, dest_dir=d, req_open=ctx3.open)
+    assert r3.path is None and "CNB 腿" in r3.err and "GitHub 腿" in r3.err \
+        and "SHA-256" in r3.err, r3.err
+    assert not (d / (up.NEW_EXE_NAME + ".part")).exists() and not (d / up.NEW_EXE_NAME).exists()
+    # ④ 交叉腿不可达（无 github_url）→ 主腿失败如实报，零额外出网
+    wipe()
+    info4 = up.UpdateInfo(version="9.9.9", url=info.url, digest=good, source="cnb")
+    ctx4 = FakeCtx(FakeResp([], cl=None, status=404))
+    r4 = up.download_update(info4, dest_dir=d, req_open=ctx4.open)
+    assert r4.path is None and "HTTP 404" in r4.err and len(ctx4.calls) == 1, r4
+    # ⑤ 旧形态直通：source=github → download_and_stage 现行为逐字节不变
+    info5 = up.UpdateInfo(version="9.9.9", url="https://dl.example/TokenWidget.exe")
+    ctx5 = FakeCtx(FakeResp([body], cl=len(body)))
+    r5 = up.download_update(info5, dest_dir=d, req_open=ctx5.open)
+    assert r5.err == "" and r5.channel == "direct" and "digest" in r5.note, r5
+    # ⑥ cnb info 缺 digest → 拒收且零网络（契约失效双保险）
+    def boom(*a, **k):
+        raise AssertionError("拒收路径不得出网")
+    info6 = up.UpdateInfo(version="1.0.0", url=info.url, digest=None, source="cnb")
+    r6 = up.download_update(info6, dest_dir=d, req_open=boom)
+    assert r6.path is None and "SHA-256" in r6.err, r6
+    return "cnb-direct 不套镜像/404 换腿/双拒收合并零残留/无回退如实/直通旧行为/缺哈希零网"
+
+
 def clear_cfg(**upd) -> None:
     cfg = {**CFG, "update": {**CFG["update"], **upd}}
     (tmp_root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -1427,6 +1675,12 @@ CASES_PURE = [
     ("mirror_chain", u28_mirror_normalize_chain),
     ("digest_guard", u29_digest_guard),
     ("dialog_helpers", u31_dialog_helpers),
+    ("cnb_primary_discovery", u37_cnb_primary_discovery),
+    ("cnb_github_conflict", u38_cnb_github_conflict),
+    ("github_lag_and_ahead", u42_github_lag_and_ahead),
+    ("cnb_fallback_github", u39_cnb_unreachable_fallback_github),
+    ("version_json_contract", u40_version_json_contract),
+    ("download_update_chain", u41_download_update_chain),
 ]
 
 CASES_TK = [

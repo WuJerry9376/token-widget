@@ -37,7 +37,12 @@
   版，FAINT/SOFT 两态烘焙 PAPER 底出 4 档 DPI PNG（assets/gh_*_{16,20,24,32}.png，
   高≈P(16)@S∈{1.0,1.25,1.5,2.0}）；运行时 tk.PhotoImage(file=) 按 S 选最近档、
   (master,档) memo 双态预载（同 ui._ROT_IMGS 模式）。色彩层级/位置/间距/tooltip/
-  点击路由/slug 空隐藏零占位与 M18 全同；自绘 gen_gh_mark 整删禁回流。
+   点击路由/slug 空隐藏零占位与 M18 全同；自绘 gen_gh_mark 整删禁回流。
+ - M-CNB（2026-10 更新分发迁移）：更新元数据+下载主源改 **CNB**（config.update.
+   cnb_base），GitHub API 降交叉校验/回退腿；两源冲突（版本或 SHA-256 互斥）→
+   状态行橙字「更新源冲突」，不弹窗不下载；弹窗下载入口换 updater.download_update
+   （CNB 主腿→GitHub 三级链回退），通道审计新增「经 CNB 直连/（代理）」档；
+   镜像源注记文案同步为「元数据走 CNB/GitHub 双源，镜像永不介入」。
 """
 from __future__ import annotations
 
@@ -400,7 +405,7 @@ class SettingsPanel(_Card):
         me.bind("<FocusOut>", self._save_mirror)
         self.ent_mirror = me
         tk.Label(self.body,
-                 text="    仅加速二进制下载，版本信息始终来自 GitHub 官方 API",
+                 text="    仅加速二进制下载，版本信息恒走 CNB/GitHub 双源、镜像永不介入",
                  font=app.f_note, **{**_tk_colors(), "fg": FAINT}).pack(anchor="w")
         rf = self.row("检查更新")
         rf.pack_configure(pady=1)
@@ -861,6 +866,11 @@ class SettingsPanel(_Card):
                                   fg=SOFT_TXT)
             return                                    # 频控不视为错误
         if not res.ok:
+            if res.conflict:
+                # M-CNB：两源都可达但版本/SHA-256 互斥——不弹窗不下载，橙字标注冲突
+                self.lbl_up.configure(text=res.err[:90], fg=ORANGE)
+                self._save_last_check()
+                return
             self.lbl_up.configure(text=f"检查失败：{res.err[:90]}", fg=ORANGE)
             self._save_last_check()
             return
@@ -1088,9 +1098,8 @@ class UpdateDialog(_Card):
                         state["last"] = done
                         self._q.put(("pct", done, total))
 
-                res = updater.download_and_stage(
-                    self.info.url, cfg=self.app.cfg, digest=self.info.digest,
-                    progress_cb=cb)
+                res = updater.download_update(
+                    self.info, cfg=self.app.cfg, progress_cb=cb)
                 if res.err:
                     self._q.put(("fail", res.err))
                     return
@@ -1115,7 +1124,9 @@ class UpdateDialog(_Card):
                                SOFT_TXT)
                 elif kind == "audit":
                     _, channel, note = item
-                    word = {"proxy": "经代理", "mirror": "经镜像源"}.get(channel, "直连")
+                    word = {"proxy": "经代理", "mirror": "经镜像源",
+                            "cnb-direct": "经 CNB 直连",
+                            "cnb-proxy": "经 CNB（代理）"}.get(channel, "直连")
                     txt = f"下载完成（{word}）· 校验通过，正在接管替换…"
                     self._prog(txt + (f"\n{note}" if note else ""), SOFT_TXT)
                 elif kind == "apply":
