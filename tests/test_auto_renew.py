@@ -32,6 +32,13 @@ from src.sources.base import Usage                    # noqa: E402
 COOLDOWN = ui_mod.AUTO_RENEW_COOLDOWN
 
 
+def _cooldown_done_ts() -> float:
+    """恒满足冷却的戳：锚在当前 monotonic 之前 2×COOLDOWN。
+    不用 0.0——Windows 上 monotonic≈开机秒数，开机 600s 内 0.0 会落进冷却
+    窗口造成假红（2026-11-09 重启后实测 3 例），本函数使断言与开机时长无关。"""
+    return time.monotonic() - 2 * COOLDOWN
+
+
 # ==================== should_auto_renew：纯决策矩阵 ====================
 
 def _flags(**over) -> Any:
@@ -116,7 +123,7 @@ class ClickCountApp:
         self.usages = [_usage(code is None, code)] if src is not None else []
         self._login_busy = busy
         self._quitting = quitting
-        self._auto_renew_ts = 0.0 if cooldown_done else time.monotonic()
+        self._auto_renew_ts = _cooldown_done_ts() if cooldown_done else time.monotonic()
         self.verbose = False
         self.clicks = 0
 
@@ -206,7 +213,7 @@ class LiveClientApp:
         self._login_q = queue.Queue()
         self._login_busy = False
         self._quitting = False
-        self._auto_renew_ts = 0.0
+        self._auto_renew_ts = _cooldown_done_ts()
         self.verbose = False
         self.refreshed = 0
         self.rendered = 0
@@ -258,7 +265,7 @@ def test_hook_starts_real_login_thread_and_success_later_round_normal():
     assert app.refreshed == 1
     # 后续正常轮（成功）→ 不再触发自动续期
     app.usages = [_usage(True)]
-    app._auto_renew_ts = 0.0
+    app._auto_renew_ts = _cooldown_done_ts()
     app._maybe_auto_renew()
     assert src.calls == 1
     # 再冷却到点后仍为成功轮 → 依然不触发
@@ -279,7 +286,7 @@ def test_hook_worker_single_flight_blocks_second_click():
     app = LiveClientApp(src)
     app._maybe_auto_renew()
     # 第二次判定：busy 仍 True（未 drain）→ 前置闸挡；且冷却时间戳已消费
-    app._auto_renew_ts = 0.0                          # 假造冷却已过，单靠 busy 守
+    app._auto_renew_ts = _cooldown_done_ts()          # 假造冷却已过，单靠 busy 守
     app._maybe_auto_renew()
     assert app._login_busy is True
     _wait_busy(app, timeout=3.0)
