@@ -10,3 +10,9 @@ dependencies = [
 
 [project.scripts]
 probe = "scripts.probe_api:main"
+
+# 测试收集范围钉死 tests/：裸跑 pytest 不再递归 rootdir——防 local/ 等维护区
+# 散件（*_test.py/test_*.py 命名）被误导入执行（2026-11-09 实证：min_webview
+# spike 曾被收集并真起 WebView2 阻塞收集 ~6h）。显式给路径的调用不受影响。
+[tool.pytest.ini_options]
+testpaths = ["tests"]
