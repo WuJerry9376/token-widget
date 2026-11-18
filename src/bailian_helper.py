@@ -144,7 +144,6 @@ L2_FAST_GRACE_SECONDS = 10.0
 L2_FAST_GRACE_PROBE_INTERVAL = 5.0
 GOTO_TIMEOUT = 5.0           # load_url 单次调用护栏（UI Invoke 可能卡死）
 POPUP_STEP_TIMEOUT = 3.0     # L3 弹窗脉冲单步（restore/show/on_top）护栏
-PREFILL_HINT_TIMEOUT = 3.0   # M31 预填横幅 evaluate_js 护栏（弹窗时限不被横幅拖住）
 #: L3 人工等待期间的窗口标题提示（关闭≠成功，见 _notify_login_window_closed）
 MANUAL_LOGIN_TITLE = "阿里云登录窗口 — 登录成功后会自动隐藏，请不要关闭！"
 
@@ -842,48 +841,283 @@ def load_login_creds():
         return None
 
 
-# ------------------------------------------------- L3 预填横幅（M31，2026-11-18）
+# ============================================ M32 CDP 车道（L2e 内嵌帧无人值守登录）
 #
-# 风控实证（3.4 装机 helper.log 11-16/11-18）：合成 submit 被静默吞时表单值仍在
-# （inputs_cleared=false），但旧版 L3 前退回 account 空表单页——用户只能重敲
-# 账密，CM 凭据在人工环节零价值。现在：inconclusive 且仍泊 passport 账密页
-# → 就地弹窗交人工（值已填好，用户只需完成验证并点击提交），并注入只读横幅
-# 说明 + 「改用扫码/短信」逃生链（点击即导航回 LOGIN_URL 完整登录页）。
+# spike 定案（tools/diag/M32_spike_findings.md，2026-11-18/19 四连取证）：
+# ① 此前自动登录从未真正成功=顶层独立 passport 页是结构死角（无父页接收
+#    postMessage，握手不启动；spike2 抓到 login.do 200 success 但页面死等）。
+# ② 解 = 回到 account 内嵌形态：页面同时挂 passkey/sms/pwd 三个 havanaone
+#    iframe，用 CDP Page.createIsolatedWorld 进 pwd 帧世界，native setter 填
+#    React 值 + el.click() 提交 → 父页自然握手 → fetch live。全程 hidden 零闪屏
+#    （spike4-A 实证：14s 拿票；CDP 鼠标事件在 hidden 被节流——本车道不依赖）。
+# ③ 线程纪律（血泪红线）：worker 线程**绝不读** .NET 属性——CoreWebView2 等
+#    STA 惰性属性跨线程触碰 = CLR/GIL 交叉死锁冻结全进程（spike 实测）。
+#    所有 .NET 触碰一律 BeginInvoke 投递 UI 线程执行，结果经 ContinueWith
+#    （线程池）+ 信号量回投；控件引用仅取 Python 侧属性链。
+# ④ 明文纪律：账密只进 CDP evaluate 表达式 JSON（与 autofill evaluate_js 载荷
+#    同密级，协议 §7）；转录/日志/异常文本零明文。
 
-_PREFILL_HINT_JS = """
+CDP_CALL_TIMEOUT = 12.0       # 单条 CDP 方法调用硬超时
+CDP_PROBE_TIMEOUT = 4.0       # 启动能力探测（1+1）
+CDP_FORM_WAIT = 20.0          # pwd 帧表单等待预算
+CDP_FRAME_POLL = 1.2          # 帧枚举/世界探测间隔
+_L2E_PWD_MARK = "appEntrance=aliyun_pc_pwd"
+_L2E_WORLD = "tw-l2e"
+#: 内嵌帧内风控挑战元素候选（可见=交人工，绝不轰炸重试）
+_L2E_CHALLENGE_SELS = ["#nc_1_wrapper", ".nc-container", "#fm-login-checkcode",
+                       "input.fm-checkcode", ".fm-slide-verify", "#nc_1_n1z",
+                       ".click-captcha", "#J_CheckCode"]
+
+_L2E_TAB_CLICK_JS = """
 (() => { try {
-  if (document.getElementById('tw-login-hint')) return 'OK';
-  const d = document.createElement('div');
-  d.id = 'tw-login-hint';
-  d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;' +
-    'background:#FBF3DF;color:#413928;padding:8px 12px;font:13px/1.6 sans-serif;' +
-    'text-align:center;border-top:1px solid #D9C79E';
-  d.textContent = %s;
-  const a = document.createElement('a');
-  a.href = %s;
-  a.textContent = '改用扫码 / 短信登录';
-  a.style.cssText = 'color:#D9782E;margin-left:8px';
-  d.appendChild(a);
-  (document.body || document.documentElement).appendChild(d);
-  return 'OK';
-} catch (e) { return 'ERR'; } })()""" % (
-    json.dumps("账号密码已自动填好；若点「立即登录」无反应，请手动重敲密码后再提交（页面状态未同步）。 "),
-    json.dumps(LOGIN_URL))
+  const texts = %s;
+  for (const t of texts) {
+    for (const el of document.querySelectorAll(
+        '.tabs-nav-item, [role=tab], .login-tab-item')) {
+      if ((el.textContent || '').trim() === t) { el.click(); return 'clicked'; }
+    }
+  }
+  return 'absent';
+} catch (e) { return 'err'; } })()""" % json.dumps(
+    list(LOGIN_TAB_TEXTS), ensure_ascii=False)
+
+_L2E_FORM_PROBE_JS = """
+(() => { try {
+  const q = s => document.querySelector(s);
+  return (q('#fm-login-id') && q('#fm-login-password') &&
+          q('form#login-form button[type="submit"]')) ? 'Y' : 'N';
+} catch (e) { return 'N'; } })()"""
+
+_L2E_CHALLENGE_JS = """
+(() => { try {
+  for (const s of %s) { const e = document.querySelector(s);
+    if (e && e.offsetParent) return 'challenge'; }
+  return 'clear';
+} catch (e) { return 'clear'; } })()""" % json.dumps(_L2E_CHALLENGE_SELS)
+
+#: 填值+提交（isolated world 内执行；async IIFE 必须 awaitPromise=true）：
+#: native value setter + input/change 事件同步 React 受控状态（直赋 .value 不
+#: 触发框架更新=「登录中…」闪回真凶之一），300ms 后 el.click() 提交
+#: （spike4-A 实证登录 handler 不校验 isTrusted，合成 click 可走通）。
+_L2E_FILL_SUBMIT_JS = """
+(async () => { try {
+  const setV = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, 'value').set;
+  const u = document.querySelector('#fm-login-id');
+  const p = document.querySelector('#fm-login-password');
+  if (!u || !p) return 'no-fields';
+  setV.call(u, %s);
+  u.dispatchEvent(new Event('input',  {bubbles: true}));
+  u.dispatchEvent(new Event('change', {bubbles: true}));
+  setV.call(p, %s);
+  p.dispatchEvent(new Event('input',  {bubbles: true}));
+  p.dispatchEvent(new Event('change', {bubbles: true}));
+  await new Promise(r => setTimeout(r, 300));
+  const b = document.querySelector('form#login-form button[type="submit"]');
+  if (!b) return 'no-btn';
+  b.click();
+  return 'clicked';
+} catch (e) { return 'ERR:' + String(e).slice(0, 80); } })()"""
 
 
-def _show_prefill_hint(window) -> None:
-    """best-effort 注入预填横幅：走 _call_with_timeout 护栏——evaluate_js 在页面
-    停摆时最长可等 ready 20s，弹窗时限不能被一条横幅拖住；超时/异常只记日志，
-    绝不动瀑布主链。"""
-    box: dict = {}
+class _CdpChannel:
+    """CallDevToolsProtocolMethodAsync 同步壳（BeginInvoke UI 投递版）。
 
-    def run():
-        box["r"] = window.evaluate_js(_PREFILL_HINT_JS)
+    通道级异常直接抛（调用方 L2e 全兜底为放弃）；BeginInvoke 本身不等待，
+    回投信号量限时 acquire——UI 线程停摆时最坏损失一条调用，绝不冻结。"""
 
-    if not _call_with_timeout(run, PREFILL_HINT_TIMEOUT, label="prefill_hint"):
-        return
-    if box.get("r") != "OK":
-        log("INFO", "prefill hint: injected, non-OK result")
+    def __init__(self, ctl):
+        import System
+        from System.Threading.Tasks import Task
+        self._S = System
+        self._T = Task
+        self._ctl = ctl
+
+    @classmethod
+    def from_window(cls, window):
+        """Python 属性链取 WinForms WebView2 控件（零 .NET 成员调用）。
+        任一环缺失/异常 → None（L2e 静默放弃，瀑布回旧形态）。"""
+        try:
+            native = getattr(window, "native", None)
+            browser = getattr(native, "browser", None) if native else None
+            ctl = getattr(browser, "webview", None) if browser else None
+            if ctl is None:
+                return None
+            return cls(ctl)
+        except Exception:                               # noqa: BLE001
+            return None
+
+    def call(self, method: str, params: dict | None = None,
+             timeout: float = CDP_CALL_TIMEOUT) -> dict:
+        box: dict = {}
+        sem = threading.Semaphore(0)
+
+        def cb(task):                                   # ContinueWith：线程池
+            try:
+                if task.IsFaulted:
+                    box["err"] = str(task.Exception)
+                else:
+                    box["res"] = task.Result
+            finally:
+                sem.release()
+
+        def ui_part():                                  # UI 线程执行
+            try:
+                cwv = self._ctl.CoreWebView2            # 合法：UI 线程读属性
+                if cwv is None:
+                    box["err"] = "CoreWebView2 not ready"
+                    sem.release()
+                    return
+                t = cwv.CallDevToolsProtocolMethodAsync(
+                    method, json.dumps(params or {}))
+                t.ContinueWith(self._S.Action[self._T[str]](cb))
+            except Exception as e:                      # noqa: BLE001
+                box["err"] = f"ui:{type(e).__name__}:{e}"
+                sem.release()
+
+        self._ctl.BeginInvoke(self._S.Action(ui_part))
+        if not sem.acquire(timeout):
+            raise TimeoutError(f"cdp {method}")
+        if box.get("err"):
+            raise RuntimeError(f"cdp {method}: {str(box['err'])[:160]}")
+        return json.loads(box.get("res") or "{}")
+
+    def ev(self, expr: str, ctx: int | None = None,
+           await_promise: bool = False,
+           timeout: float = CDP_CALL_TIMEOUT):
+        p = {"expression": expr, "returnByValue": True}
+        if await_promise:
+            p["awaitPromise"] = True
+        if ctx is not None:
+            p["contextId"] = ctx
+        r = self.call("Runtime.evaluate", p, timeout=timeout)
+        if r.get("exceptionDetails"):
+            raise RuntimeError("cdp eval threw")
+        return (r.get("result") or {}).get("value")
+
+
+def _cdp_havana_frames(cdp: _CdpChannel) -> list[tuple[str, str]]:
+    """Page.getFrameTree 全树枚举，取 url 含 havanaone 的 (frameId, url)。"""
+    tree = cdp.call("Page.getFrameTree")
+    out: list[tuple[str, str]] = []
+    stack = [tree.get("frameTree") or {}]
+    while stack:
+        node = stack.pop()
+        fr = node.get("frame") or {}
+        url = fr.get("url") or ""
+        if fr.get("id") and "havanaone" in url:
+            out.append((fr["id"], url))
+        stack.extend(node.get("childFrames") or [])
+    return out
+
+
+def _cdp_find_pwd_world(cdp: _CdpChannel, budget: float = CDP_FORM_WAIT,
+                        stop=None) -> int | None:
+    """轮询找 pwd entrance 帧并建 isolated world；表单三要素探针命中→ctx。
+    每拍重举 frameTree（tab 切换后帧集合会变）；stop 置位即撤。"""
+    t_end = time.monotonic() + float(budget)
+    while time.monotonic() < t_end:
+        if stop is not None and stop.is_set():
+            return None
+        try:
+            frames = _cdp_havana_frames(cdp)
+        except Exception:                               # noqa: BLE001
+            return None
+        for fid, url in frames:
+            if _L2E_PWD_MARK not in url:
+                continue
+            try:
+                iso = cdp.call("Page.createIsolatedWorld",
+                               {"frameId": fid, "worldName": _L2E_WORLD,
+                                "grantUniveralAccess": False})
+                ctx = iso.get("executionContextId")
+                if ctx is None:
+                    continue
+                if cdp.ev(_L2E_FORM_PROBE_JS, ctx, timeout=6.0) == "Y":
+                    return ctx
+            except Exception:                           # noqa: BLE001
+                continue
+        time.sleep(CDP_FRAME_POLL)
+    return None
+
+
+def _cdp_available(st: dict) -> bool:
+    """进程内一次探测常驻（st['cdp_ok']）：主框 Runtime.evaluate 1+1。
+    False → L2e 整条车道静默，瀑布行为= v1.10.4 形态（零回归保证）。"""
+    if "cdp_ok" in st:
+        return bool(st["cdp_ok"])
+    ok = False
+    ch = None
+    if st.get("allow_l2e", True):
+        ch = _CdpChannel.from_window(st["window"])
+        if ch is not None:
+            try:
+                ok = str(ch.ev("String(1+1)",
+                               timeout=CDP_PROBE_TIMEOUT + 2.0)) == "2"
+            except Exception as e:                      # noqa: BLE001
+                log("INFO", f"L2e probe failed: {type(e).__name__}")
+                ch = None
+    st["cdp_ok"] = ok
+    st["cdp_channel"] = ch if ok else None
+    log("INFO", f"L2e cdp_ok={ok}")
+    return ok
+
+
+def cdp_embedded_login(st: dict, username: str, password: str) -> str:
+    """L2e 主入口（瀑布 step3a 调用；页面应已泊 account 内嵌页）。返回：
+      'submitted'  填交完成、握手已启动 → 调用方 _await_live 判活
+      'challenge'  帧内风控挑战可见 → 就地 L3（值保留，不回顶层）
+      'off'        CDP 车道不可用 → 旧顶层 JS 腿
+      'failed'     车道可用但未能发提交 → 旧顶层 JS 腿
+    全异常兜底；通道级故障熔断（cdp_ok=False）。明文绝不进日志。"""
+    if not _cdp_available(st):
+        return "off"
+    ch = st.get("cdp_channel")
+    if ch is None or st["stop"].is_set():
+        return "off"
+    try:
+        try:
+            tab = ch.ev(_L2E_TAB_CLICK_JS, timeout=8.0)
+            log("INFO", f"L2e tab: {tab}")
+        except Exception as e:                          # noqa: BLE001
+            log("INFO", f"L2e tab probe skipped: {type(e).__name__}")
+        if st["stop"].is_set():
+            return "failed"
+        ctx = _cdp_find_pwd_world(ch, stop=st["stop"])
+        if ctx is None:
+            log("INFO", "L2e: no pwd frame world -> fallback leg")
+            return "failed"
+        try:
+            if ch.ev(_L2E_CHALLENGE_JS, ctx, timeout=8.0) == "challenge":
+                log("INFO", "L2e: in-frame challenge -> manual on embedded")
+                return "challenge"
+        except Exception:                               # noqa: BLE001
+            pass
+        r = ch.ev(_L2E_FILL_SUBMIT_JS % (json.dumps(str(username)),
+                                         json.dumps(str(password))),
+                  ctx, await_promise=True, timeout=20.0)
+        log("INFO", f"L2e submit: {r}")
+        return "submitted" if r == "clicked" else "failed"
+    except Exception as e:                              # noqa: BLE001
+        log("WARN", f"L2e channel failure, fuse blown: {type(e).__name__}")
+        st["cdp_ok"] = False
+        st["cdp_channel"] = None
+        return "failed"
+
+
+def cdp_l2e_challenge_now(st: dict) -> bool:
+    """L2e 提交后握手不完整时的挑战复检（4s 短预算）：True=帧内弹了验证，
+    交嵌入式 L3；False=无挑战证据（继续顶层兜底腿）。"""
+    ch = st.get("cdp_channel") if st.get("cdp_ok") else None
+    if ch is None:
+        return False
+    try:
+        ctx = _cdp_find_pwd_world(ch, budget=4.0, stop=st["stop"])
+        if ctx is None:
+            return False
+        return ch.ev(_L2E_CHALLENGE_JS, ctx, timeout=6.0) == "challenge"
+    except Exception:                                   # noqa: BLE001
+        return False
 
 
 def store_login_creds(username, password) -> dict:
@@ -1642,66 +1876,82 @@ def _interactive_login(st: dict, force: bool = False):
             results = results2
         if rs == "live" and not force:
             return _finish_live(st, results, "silent")
-        # 3. L2：CM 账密自动填充（仅在页面可执行 JS 时尝试）。
-        #    实探取证（2026-10-10）：account 登录页表单在跨源 iframe、顶层零输入
-        #    元素——先提升 passport 账密 entrance 到顶层（17:11 修订：实时抓取
-        #    iframe src、失败兜底静态 URL），填充失败再回 account 完整登录页交
-        #    人工（L3 弹窗停在用户可输入页）。
+        # 3. L2：CM 账密自动填充。M32 双层结构：
+        #    3a L2e（首选）：account 内嵌页 + CDP isolated world 填交（全程
+        #       hidden，握手由父页完成；spike4-A 实证 ~14s live）。submitted
+        #       → 复用 _await_live 判活；challenge → 就地嵌入式 L3（值已在
+        #       iframe 里、父页在手，人工补验证后提交可走通）。
+        #    3b 顶层 JS autofill（旧腿，CDP 不可用/L2e 未发出提交/握手不完整
+        #       时兜底）。失败后一律回 account 内嵌页再 L3——顶层独立页无父
+        #       页接收 postMessage，连人工点提交都会卡在握手（spike2/4 实证），
+        #       v1.10.2~1.10.4 的「预填就地停顶层页」腿就此废止（死角窗陷阱）。
         creds = load_login_creds()
-        if creds is not None and _page_ready_now(window):
+        if creds is not None:
             username, password = str(creds[0]), str(creds[1])
-            _promote_to_pwd_entrance(window)
-            l2 = _normalize_autofill_result(autofill_login(
-                window, username, password,
-                inputs_budget=float(st.get("autofill_inputs_budget",
-                                            AUTOFILL_INPUTS_BUDGET)),
-                verify_wait=float(st.get("submit_verify_wait",
-                                         SUBMIT_VERIFY_WAIT))))
-            await_full = False
-            if l2["submitted"]:
-                if l2["verify"] == "cleared":
-                    # submit 被接受（握手在途）：等待有回报，维持全量 await
-                    await_full = True
-                else:
-                    # 17:25 实证：inconclusive（疑似风控静默拦截——提交被吞，
-                    # 等待不可能生效）与 err（错密码等，等待同样无意义）都不
-                    # 该再烧满 AUTOFILL_BUDGET 的泊航轮 → 廉价宽限后快速升级。
-                    grace = _l2_fast_grace(st)
-                    if grace == "cancelled":
-                        return "error", results, "cancelled"
-                    if grace == "left":
-                        await_full = True        # 慢 redirect 离开登录 host=真在途
-                    else:
-                        gsec = float(st.get("l2_grace_seconds",
-                                            L2_FAST_GRACE_SECONDS))
-                        log("INFO", f"L2 fast-escalate: verify={l2['verify']} "
-                                    f"(grace {gsec:.0f}s still on login "
-                                    f"host) -> L3")
-            if await_full:
+            l2e = cdp_embedded_login(st, username, password)
+            if l2e == "submitted":
                 rs, res2, _d = _await_live(st, AUTOFILL_BUDGET,
                                            recheck=L2_RECHECK_SECONDS)
                 if res2 is not None:
                     results = res2
                 if rs == "live":
-                    return _finish_live(st, results, "autofill")
+                    return _finish_live(st, results, "cdp-embed")
                 if rs == "error":
                     return "error", results, "cancelled"
-            # L2 未成功（快速升级，或提交后 AUTOFILL_BUDGET 内未 live）：
-            # M31 预填——inconclusive=风控吞提交但表单值仍在页上，且仍泊
-            # passport 账密顶层页 → 就地弹窗交人工补验证（保住 CM 已填账密，
-            # 用户不必重敲）；prefail/err（值不可信或从未填上）保持旧腿：
-            # 回 account 完整登录页（扫码/短信/RAM 全形态）再进 L3。
-            if _url_host(_url_for_log(window)) == PWD_LOGIN_HOST:
-                if l2["submitted"] and l2["verify"] == "inconclusive":
-                    log("INFO", "L3 prefill: stay on filled passport entrance")
-                    _show_prefill_hint(window)
+                if cdp_l2e_challenge_now(st):
+                    log("INFO", "L2e post-submit challenge -> L3 embedded")
+                    l2e = "challenge"
                 else:
+                    log("INFO", "L2e handshake incomplete -> top-page fallback")
+                    l2e = "failed"
+            if l2e == "challenge":
+                pass                          # 就地当前内嵌页进 step4 L3，值保留
+            elif _page_ready_now(window):
+                _promote_to_pwd_entrance(window)
+                l2 = _normalize_autofill_result(autofill_login(
+                    window, username, password,
+                    inputs_budget=float(st.get("autofill_inputs_budget",
+                                                AUTOFILL_INPUTS_BUDGET)),
+                    verify_wait=float(st.get("submit_verify_wait",
+                                             SUBMIT_VERIFY_WAIT))))
+                await_full = False
+                if l2["submitted"]:
+                    if l2["verify"] == "cleared":
+                        # submit 被接受（握手在途）：等待有回报，维持全量 await
+                        await_full = True
+                    else:
+                        # 17:25 实证：inconclusive（疑似风控静默拦截——提交被吞，
+                        # 等待不可能生效）与 err（错密码等，等待同样无意义）都不
+                        # 该再烧满 AUTOFILL_BUDGET 的泊航轮 → 廉价宽限后快速升级。
+                        grace = _l2_fast_grace(st)
+                        if grace == "cancelled":
+                            return "error", results, "cancelled"
+                        if grace == "left":
+                            await_full = True        # 慢 redirect 离开登录 host=真在途
+                        else:
+                            gsec = float(st.get("l2_grace_seconds",
+                                                L2_FAST_GRACE_SECONDS))
+                            log("INFO", f"L2 fast-escalate: verify={l2['verify']} "
+                                        f"(grace {gsec:.0f}s still on login "
+                                        f"host) -> L3")
+                if await_full:
+                    rs, res2, _d = _await_live(st, AUTOFILL_BUDGET,
+                                               recheck=L2_RECHECK_SECONDS)
+                    if res2 is not None:
+                        results = res2
+                    if rs == "live":
+                        return _finish_live(st, results, "autofill")
+                    if rs == "error":
+                        return "error", results, "cancelled"
+                # L2 未成功：回 account 内嵌页——唯一可让人工提交走完握手的落点
+                if _url_host(_url_for_log(window)) == PWD_LOGIN_HOST:
                     _goto(window, LOGIN_URL)
                     _wait_page_ready(window, RELOAD_SETTLE_BUDGET)
+            else:
+                # 单次尝试门控保留（页面不可执行 JS 时顶层填充必败），补 skip 日志
+                log("INFO", "L2 top-leg skipped: page not ready (L2e attempted)")
         else:
-            # 单次尝试门控保留（页面不可执行 JS 时填充必败），但补 skip-reason 日志
-            log("INFO", "L2 autofill skipped: " +
-                ("no credentials" if creds is None else "page not ready"))
+            log("INFO", "L2 autofill skipped: no credentials")
         # 4. L3：人工（协议 §1：仅此处弹窗）；等待期禁 fetch 风暴（§6 修订）
         log("INFO", "L2 incomplete -> L3 manual login (popup)")
         _popup_pulse(window, st)

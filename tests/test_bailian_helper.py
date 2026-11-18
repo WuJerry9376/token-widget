@@ -2283,8 +2283,9 @@ class TestM31FlakyGate:
         capsys.readouterr()
 
 
-class TestM31PrefillStay:
-    """L2 inconclusive 预填腿：值在页上就不再回 account 清空。"""
+class TestM32EmbeddedBounce:
+    """M32 废止预填滞留腿：顶层 L2 任何失败形态一律回 account 内嵌页 L3
+    （顶层独立页无父页接收 postMessage，人工提交也卡握手——spike2/4 实证）。"""
 
     def _drive(self, monkeypatch, verify):
         monkeypatch.setattr(bh, "_auth", _CredsAuth)
@@ -2293,61 +2294,259 @@ class TestM31PrefillStay:
         monkeypatch.setattr(bh, "autofill_login",
                             lambda *a, **k: {"submitted": True, "verify": verify})
         monkeypatch.setattr(bh, "_l2_fast_grace", lambda _st: "parked")
-        hints = []
-        monkeypatch.setattr(bh, "_show_prefill_hint",
-                            lambda _w: hints.append(1))
         w = NavWindow(bh.Api(), url=_PWDS_PAGE, envelope=_BAD_ENV)
         st = _round_st(w, manual_budget=0.1, submit_verify_wait=0.0)
         bh.handle_command(st, {"cmd": "login_interactive", "id": 93})
-        return w, hints
+        return w
 
-    def _last_pwd_idx(self, w):
-        return max(i for i, u in enumerate(w.load_urls) if u == bh.PWD_LOGIN_URL)
+    def _bounced(self, w):
+        i_pwd = max(i for i, u in enumerate(w.load_urls) if u == bh.PWD_LOGIN_URL)
+        return bh.LOGIN_URL in w.load_urls[i_pwd + 1:]
 
-    def test_inconclusive_stays_on_filled_passport_page(self, monkeypatch, capsys):
-        """inconclusive + 泊 passport：不回 account、横幅注入一次、L3 照常弹窗。"""
-        w, hints = self._drive(monkeypatch, "inconclusive")
-        assert bh.LOGIN_URL not in w.load_urls[self._last_pwd_idx(w) + 1:]
-        assert hints == [1]
+    def _no_hint_left(self, w):
+        # 废止腿的判据：不再有「预填横幅」注入脚本
+        return not any("tw-login-hint" in s for s in w.scripts)
+
+    def test_inconclusive_bounces_to_embedded(self, monkeypatch, capsys):
+        w = self._drive(monkeypatch, "inconclusive")
+        assert self._bounced(w)
+        assert self._no_hint_left(w)
         assert {"event": "login_required"} in _stdout_json(capsys)
 
-    def test_prefail_still_bounces_to_account(self, monkeypatch, capsys):
-        """prefail（值没填上）：旧行为保持——回 account 完整表单，无横幅。"""
-        w, hints = self._drive(monkeypatch, "prefail")
-        assert bh.LOGIN_URL in w.load_urls[self._last_pwd_idx(w) + 1:]
-        assert hints == []
+    def test_err_bounces_to_embedded(self, monkeypatch, capsys):
+        w = self._drive(monkeypatch, "err")
+        assert self._bounced(w)
+        assert self._no_hint_left(w)
         capsys.readouterr()
 
-    def test_err_wrong_password_bounces_without_hint(self, monkeypatch, capsys):
-        """err（可见报错，账密可疑）：同样回 account 交人工修正，不预填。"""
-        w, hints = self._drive(monkeypatch, "err")
-        assert bh.LOGIN_URL in w.load_urls[self._last_pwd_idx(w) + 1:]
-        assert hints == []
+    def test_prefail_bounces_to_embedded(self, monkeypatch, capsys):
+        w = self._drive(monkeypatch, "prefail")
+        assert self._bounced(w)
+        assert self._no_hint_left(w)
         capsys.readouterr()
 
 
-class TestM31PrefillHintJs:
-    def test_hint_injected_once_is_readonly_and_credential_free(self):
-        class Rec:
-            def __init__(self):
-                self.scripts = []
+# ============================================================ M32 CDP 车道单测
+# spike 定案（tools/diag/M32_spike_findings.md）：L2e=account 内嵌页 +
+# havanaone pwd 帧 isolated world + native setter 填 React + el.click() 提交，
+# 父页握手（spike4-A hidden 实证 14s 拿票）。以下为假 channel 驱动。
 
-            def evaluate_js(self, s):
-                self.scripts.append(s)
-                return "OK"
+_TREE_PWD = {"frameTree": {"frame": {
+    "id": "F1",
+    "url": "https://passport.aliyun.com/havanaone/login/login.htm"
+           "?x=appEntrance=aliyun_pc_pwd&y=1"}, "childFrames": []}}
+_TREE_NO_PWD = {"frameTree": {"frame": {"id": "F0", "url": "https://x"},
+                              "childFrames": []}}
+_ISO_OK = {"executionContextId": 7}
 
-        w = Rec()
-        bh._show_prefill_hint(w)
-        assert len(w.scripts) == 1
-        s = w.scripts[0]
-        assert "tw-login-hint" in s and json.dumps(bh.LOGIN_URL) in s
-        assert ".click()" not in s and "fetch(" not in s      # 只读横幅
-        assert "password" not in s.lower() or "fm-login" not in s
 
-    def test_hint_bridge_raise_is_swallowed(self):
-        class Boom:
-            def evaluate_js(self, s):
-                raise RuntimeError("bridge dead")
+class _FakeChannel:
+    """脚本化假通道：ev 按 expr 子串命中返回，call 按 method 返回；全量记录。"""
 
-        bh._show_prefill_hint(Boom())                         # 不得外抛
+    def __init__(self, ev_script=None, call_script=None,
+                 ev_default="absent", raise_ev=()):
+        self.ev_script = ev_script or {}
+        self.call_script = call_script or {}
+        self.ev_default = ev_default
+        self.raise_ev = tuple(raise_ev)
+        self.evs = []
+        self.calls = []
+
+    def ev(self, expr, ctx=None, await_promise=False, timeout=None):
+        self.evs.append((expr, ctx, await_promise))
+        for key in self.raise_ev:
+            if key in expr:
+                raise RuntimeError("channel dead")
+        for key, val in self.ev_script.items():
+            if key in expr:
+                return val
+        return self.ev_default
+
+    def call(self, method, params=None, timeout=None):
+        self.calls.append((method, params))
+        v = self.call_script.get(method)
+        return v if isinstance(v, dict) else {}
+
+
+def _st_lane(ch, **over):
+    st = {"window": object(), "stop": threading.Event(),
+          "cdp_ok": True, "cdp_channel": ch}
+    st.update(over)
+    return st
+
+
+class TestM32LaneAvailability:
+    def test_probe_success_and_cached(self, monkeypatch):
+        ch = _FakeChannel(ev_script={"String(1+1)": "2"})
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window: ch))
+        st = {"window": object(), "stop": threading.Event()}
+        assert bh._cdp_available(st) is True
+        assert bh._cdp_available(st) is True
+        assert len(ch.evs) == 1                     # 二次读缓存，不再探测
+        assert st["cdp_channel"] is ch
+
+    def test_probe_no_channel_off(self, monkeypatch):
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window: None))
+        st = {"window": object(), "stop": threading.Event()}
+        assert bh._cdp_available(st) is False
+        assert st["cdp_ok"] is False
+
+    def test_probe_wrong_value_off(self, monkeypatch):
+        ch = _FakeChannel(ev_default="nil")
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window: ch))
+        st = {"window": object(), "stop": threading.Event()}
+        assert bh._cdp_available(st) is False
+
+    def test_allow_l2e_flag_respected(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window:
+                                        calls.append(1) or None))
+        st = {"window": object(), "stop": threading.Event(), "allow_l2e": False}
+        assert bh._cdp_available(st) is False
+        assert calls == []                          # 开关关闭：连通道都不建
+
+
+class TestM32EmbeddedLogin:
+    _EV_OK = {"tabs-nav-item": "absent",
+              "'Y' : 'N'": "Y",
+              "return 'challenge'": "clear",
+              "b.click()": "clicked"}
+
+    def test_submitted_full_sequence_no_plaintext_leak(self, monkeypatch, capsys):
+        ch = _FakeChannel(ev_script=dict(self._EV_OK),
+                          call_script={"Page.getFrameTree": _TREE_PWD,
+                                       "Page.createIsolatedWorld": _ISO_OK})
+        monkeypatch.setattr(bh.time, "sleep", lambda s: None)
+        st = _st_lane(ch)
+        got = bh.cdp_embedded_login(st, "user@example.com", "s3cr3t-pw")
+        assert got == "submitted"
+        fill = [e for e in ch.evs if "b.click()" in e[0]][0]
+        assert fill[1] == 7 and fill[2] is True     # ctx=隔离世界 + awaitPromise
+        err = capsys.readouterr().err
+        assert "L2e submit: clicked" in err
+        assert "s3cr3t-pw" not in err and "user@example.com" not in err
+
+    def test_challenge_aborts_before_submit(self, monkeypatch, capsys):
+        ev = dict(self._EV_OK)
+        ev["return 'challenge'"] = "challenge"
+        ch = _FakeChannel(ev_script=ev,
+                          call_script={"Page.getFrameTree": _TREE_PWD,
+                                       "Page.createIsolatedWorld": _ISO_OK})
+        monkeypatch.setattr(bh.time, "sleep", lambda s: None)
+        st = _st_lane(ch)
+        assert bh.cdp_embedded_login(st, "u", "p") == "challenge"
+        assert not any("b.click()" in e[0] for e in ch.evs)   # 绝不提交
+        capsys.readouterr()
+
+    def test_fill_not_clicked_returns_failed(self, monkeypatch):
+        ev = dict(self._EV_OK)
+        ev["b.click()"] = "no-btn"
+        ch = _FakeChannel(ev_script=ev,
+                          call_script={"Page.getFrameTree": _TREE_PWD,
+                                       "Page.createIsolatedWorld": _ISO_OK})
+        monkeypatch.setattr(bh.time, "sleep", lambda s: None)
+        st = _st_lane(ch)
+        assert bh.cdp_embedded_login(st, "u", "p") == "failed"
+
+    def test_no_pwd_world_returns_failed(self, monkeypatch):
+        ch = _FakeChannel(ev_script=dict(self._EV_OK),
+                          call_script={"Page.getFrameTree": _TREE_NO_PWD})
+        monkeypatch.setattr(bh.time, "sleep", lambda s: None)
+        vals = iter([0.0, 0.0, 100.0])
+        last = [0.0]
+
+        def clock():
+            try:
+                last[0] = next(vals)
+            except StopIteration:
+                pass
+            return last[0]
+
+        monkeypatch.setattr(bh.time, "monotonic", clock)
+        st = _st_lane(ch)
+        assert bh.cdp_embedded_login(st, "u", "p") == "failed"
+
+    def test_channel_exception_blows_fuse(self, monkeypatch, capsys):
+        ev = dict(self._EV_OK)
+        ch = _FakeChannel(ev_script=ev,
+                          call_script={"Page.getFrameTree": _TREE_PWD,
+                                       "Page.createIsolatedWorld": _ISO_OK},
+                          raise_ev=("b.click()",))
+        monkeypatch.setattr(bh.time, "sleep", lambda s: None)
+        st = _st_lane(ch)
+        assert bh.cdp_embedded_login(st, "u", "p") == "failed"
+        assert st["cdp_ok"] is False and st["cdp_channel"] is None
+        err = capsys.readouterr().err
+        assert "fuse blown" in err and "s3cr3t" not in err
+
+    def test_off_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(bh, "_cdp_available", lambda st: False)
+        st = {"window": object(), "stop": threading.Event()}
+        assert bh.cdp_embedded_login(st, "u", "p") == "off"
+
+
+class TestM32WaterfallWiring:
+    """瀑布 step3 分流：submitted×live→cdp-embed 收工；challenge→嵌入式 L3
+    （不促顶层）；握手不完整→顶层兜底腿（挑战复检 True 则仍嵌入式）。"""
+
+    def _drive(self, monkeypatch, l2e, await_ret="timeout", chal_now=False,
+               cid=96):
+        monkeypatch.setattr(bh, "_auth", _CredsAuth)
+        monkeypatch.setattr(bh, "_win32_show_topmost", lambda *a, **k: True)
+        monkeypatch.setattr(bh, "_win32_show_hide", lambda *a, **k: True)
+        monkeypatch.setattr(bh, "cdp_embedded_login", lambda st, u, p: l2e)
+        monkeypatch.setattr(bh, "cdp_l2e_challenge_now", lambda st: chal_now)
+        seen = {"await": [], "autofill": 0}
+
+        def fake_await(_st, budget, recheck=None):
+            seen["await"].append((budget, recheck))
+            res = {"usage": {}} if await_ret == "live" else None
+            return await_ret, res, None
+
+        def fake_autofill(*a, **k):
+            seen["autofill"] += 1
+            return {"submitted": False, "verify": "prefail"}
+
+        monkeypatch.setattr(bh, "_await_live", fake_await)
+        monkeypatch.setattr(bh, "autofill_login", fake_autofill)
+        w = NavWindow(bh.Api(), url=_LOGIN_PAGE, envelope=_BAD_ENV)
+        st = _round_st(w, manual_budget=0.1, submit_verify_wait=0.0)
+        bh.handle_command(st, {"cmd": "login_interactive", "id": cid})
+        return w, seen, st
+
+    def test_submitted_live_finishes_cdp_embed(self, monkeypatch, capsys):
+        _w, seen, st = self._drive(monkeypatch, "submitted", await_ret="live")
+        assert seen["autofill"] == 0                    # 不再走顶层腿
+        assert (bh.AUTOFILL_BUDGET, bh.L2_RECHECK_SECONDS) in seen["await"]
+        out = _stdout_json(capsys)
+        done = [o for o in out if o.get("event") == "login_done"]
+        assert done and done[0]["method"] == "cdp-embed"
+        assert out[-1]["state"] == "live" and st["state"] == "live"
+
+    def test_challenge_pops_embedded_without_top_leg(self, monkeypatch, capsys):
+        w, seen, _st = self._drive(monkeypatch, "challenge")
+        assert seen["autofill"] == 0
+        assert bh.PWD_LOGIN_URL not in w.load_urls      # 未促顶层=值留在内嵌帧
+        out = _stdout_json(capsys)
+        assert {"event": "login_required"} in out       # 嵌入式人工兜底照发
+        capsys.readouterr()
+
+    def test_incomplete_falls_back_to_top_leg(self, monkeypatch, capsys):
+        _w, seen, _st = self._drive(monkeypatch, "submitted",
+                                    await_ret="timeout", chal_now=False)
+        assert seen["autofill"] == 1                    # 顶层 JS 腿兜底执行
+        out = _stdout_json(capsys)
+        assert {"event": "login_required"} in out       # 最终仍嵌入式 L3
+        capsys.readouterr()
+
+    def test_incomplete_with_late_challenge_skips_top_leg(self, monkeypatch, capsys):
+        w, seen, _st = self._drive(monkeypatch, "submitted",
+                                   await_ret="timeout", chal_now=True)
+        assert seen["autofill"] == 0                    # 帧内弹了验证：不再重复提交
+        assert bh.PWD_LOGIN_URL not in w.load_urls
+        assert {"event": "login_required"} in _stdout_json(capsys)
 
