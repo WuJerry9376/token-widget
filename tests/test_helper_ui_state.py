@@ -223,9 +223,10 @@ def u_cred(code="LOGIN_EXPIRED"):
     return Usage(provider="bailian", ok=False, error_code=code, error_msg="x")
 
 
-def _drain_with_result(app, timeout: float = 5.0):
-    """等 worker 线程回包后在主线程手动 drain。默认 5s：全量套件并发下
-    daemon 线程起调可能 >2s（2026-11-18 M31b 全量跑实测竞态），放宽纯等。"""
+def _drain_with_result(app, timeout: float = 15.0):
+    """等 worker 线程回包后在主线程手动 drain。默认 15s：曾有套件级 tkinter
+    GC finalizer 跨线程死锁饿死 worker（已修，见 tests/conftest.py），此处的
+    宽限与 5s→15s 一并留作兜底；正常路径 item 毫秒级即达，不拖慢套件。"""
     deadline = time.time() + timeout
     while app._login_q.empty() and time.time() < deadline:
         time.sleep(0.01)
@@ -270,7 +271,7 @@ def test_click_busy_guard_starts_single_thread():
     app._bailian_cred_click()                      # 在途 → 直接吞掉
     assert app._login_busy is True
     assert threading_count() == n_threads          # 无第二个 worker
-    _drain_with_result(app, timeout=3.0)
+    _drain_with_result(app, timeout=10.0)
 
 
 def test_drain_falls_back_to_panel_when_login_returns_none():

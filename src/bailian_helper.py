@@ -855,9 +855,9 @@ _PREFILL_HINT_JS = """
   if (document.getElementById('tw-login-hint')) return 'OK';
   const d = document.createElement('div');
   d.id = 'tw-login-hint';
-  d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+  d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;' +
     'background:#FBF3DF;color:#413928;padding:8px 12px;font:13px/1.6 sans-serif;' +
-    'text-align:center;border-bottom:1px solid #D9C79E';
+    'text-align:center;border-top:1px solid #D9C79E';
   d.textContent = %s;
   const a = document.createElement('a');
   a.href = %s;
@@ -867,7 +867,7 @@ _PREFILL_HINT_JS = """
   (document.body || document.documentElement).appendChild(d);
   return 'OK';
 } catch (e) { return 'ERR'; } })()""" % (
-    json.dumps("账号密码已自动填好 — 在页面里完成验证并点击登录即可。 "),
+    json.dumps("账号密码已自动填好；若点「立即登录」无反应，请手动重敲密码后再提交（页面状态未同步）。 "),
     json.dumps(LOGIN_URL))
 
 
