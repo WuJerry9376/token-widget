@@ -1284,8 +1284,19 @@ class NoteApp:
             self._login_busy = True
             threading.Thread(target=self._cred_login_work, args=(src,),
                              daemon=True, name="bailian-interactive-login").start()
+            self._render_cred_hint()
             return
         self.open_credentials()
+
+    def _render_cred_hint(self) -> None:
+        """M31b：busy 置位即重绘一帧，行内「正在尝试登录…」反馈当帧生效
+        （FakeApp 等替身无 _render 时 getattr 守卫静默跳过）。"""
+        render = getattr(self, "_render", None)
+        if callable(render):
+            try:
+                render()
+            except Exception:                           # noqa: BLE001
+                pass
 
     def reauth_login(self) -> bool:
         """M26 管理面板「弹窗重新登录/切换账号」出口：复用 _cred_login_work/
@@ -1301,6 +1312,7 @@ class NoteApp:
         self._login_busy = True
         threading.Thread(target=self._cred_login_work, args=(src, "reauth"),
                          daemon=True, name="bailian-interactive-login").start()
+        self._render_cred_hint()
         return True
 
     def _bailian_cred_manage(self) -> None:
@@ -2048,11 +2060,16 @@ class NoteApp:
         if u.provider == "bailian":
             # M25：非 legacy 且 helper 已发事件（login_required/login_failed）→ 行文案
             # 用事件语义；点击一律走 _bailian_cred_click（内部再分 helper/粘贴两路）。
+            # M31b：登录请求在途（busy）且尚无事件 → 进行中反馈，根治点击后
+            # step1/自愈/瀑布导航的 40~90s 空窗「没反应」体感。
             txt = "需重新登录凭据（Cookie 过期）"
             src = self._bailian_source()
             if (src is not None and getattr(src, "mode", "legacy") != "legacy"
                     and getattr(src, "event_text", None)):
                 txt = src.event_text
+            elif (src is not None and getattr(src, "mode", "legacy") != "legacy"
+                    and getattr(self, "_login_busy", False)):
+                txt = "正在尝试登录（助手处理中，若弹出验证窗请完成登录）"
             return (txt, "更新登录凭据…", self._bailian_cred_click)
         code = u.error_code or ""
         if code == "REGION_BLOCKED":

@@ -2254,17 +2254,17 @@ class TestM31FlakyGate:
         assert not [o for o in out if o.get("event") == "login_required"]
         assert out[-1]["id"] == 91 and out[-1]["state"] == "live" and out[-1]["ok"]
 
-    def test_error_twice_aborts_without_popup(self, monkeypatch, capsys):
-        """error → 自愈仍 error：页面环境病——abort，不下瀑布不弹窗。"""
+    def test_error_twice_selfheals_then_waterfalls(self, monkeypatch, capsys):
+        """M31b：error → 自愈仍 error——**不再 abort**（v1.10.2 回归：真掉线冷
+        启动连轮 error 会被闸死，橙态卡死、点 pill 没反应）。现自愈只有加分权：
+        捞不回 live 就照常导航下瀑布、发 login_required，弹窗兜底常开。"""
         w, st, af, rounds = self._drive(monkeypatch, ["error", "error"])
-        assert bh.LOGIN_URL not in w.load_urls
         assert w.load_urls[0] == bh.CONSOLE_URL          # 自愈回 console 一次
-        assert af == [] and rounds == 2
-        assert st["state"] == "error"
+        assert rounds >= 2                               # step1 + 自愈轮（瀑布继续还有轮）
+        assert bh.LOGIN_URL in w.load_urls               # M31b：仍下瀑布（step2 导航）
+        assert af != []                                  # L2 被调用
         out = _stdout_json(capsys)
-        assert not [o for o in out if o.get("event") == "login_required"]
-        assert out[-1]["id"] == 91 and out[-1]["state"] == "error"
-        assert out[-1]["error"] == "HELPER_ERROR"
+        assert {"event": "login_required"} in out        # 弹窗兜底常开（非 abort）
 
     def test_error_then_need_login_still_falls(self, monkeypatch, capsys):
         """error → 自愈轮 need_login：真掉线不漏救——照常下 L2/L3 瀑布。"""

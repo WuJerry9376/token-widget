@@ -195,6 +195,7 @@ class FakeApp:
     """借用 NoteApp 的实现做纯逻辑驱动（不建 root/不画布）。"""
     _bailian_source = ui_mod.NoteApp._bailian_source
     _bailian_cred_click = ui_mod.NoteApp._bailian_cred_click
+    _render_cred_hint = ui_mod.NoteApp._render_cred_hint   # M31b：点击链调用
     _cred_login_work = ui_mod.NoteApp._cred_login_work
     _cred_login_drain = ui_mod.NoteApp._cred_login_drain
     _cred_ui = ui_mod.NoteApp._cred_ui
@@ -222,8 +223,9 @@ def u_cred(code="LOGIN_EXPIRED"):
     return Usage(provider="bailian", ok=False, error_code=code, error_msg="x")
 
 
-def _drain_with_result(app, timeout=2.0):
-    """等 worker 线程回包后在主线程手动 drain。"""
+def _drain_with_result(app, timeout: float = 5.0):
+    """等 worker 线程回包后在主线程手动 drain。默认 5s：全量套件并发下
+    daemon 线程起调可能 >2s（2026-11-18 M31b 全量跑实测竞态），放宽纯等。"""
     deadline = time.time() + timeout
     while app._login_q.empty() and time.time() < deadline:
         time.sleep(0.01)
@@ -364,3 +366,46 @@ def test_drain_reauth_none_falls_back_to_paste_panel():
 def threading_count() -> int:
     return sum(1 for t in threading.enumerate()
                if t.name == "bailian-interactive-login" and t.is_alive())
+
+
+# ==================== M31b（2026-11-18 晚）：点击进行中文案 + 当帧重绘 ====================
+
+def test_cred_ui_busy_text_when_no_event():
+    """auto + helper 在途（busy）且无事件 → 行文案给进行中反馈（点击不再"没反应"）。"""
+    src = make_source(FakeClient())
+    app = FakeApp(src)
+    app._login_busy = True
+    warn, btn, _ = app._cred_ui(u_cred())
+    assert "正在尝试登录" in warn
+    assert btn == "更新登录凭据…"
+
+
+def test_cred_ui_event_text_wins_over_busy():
+    """已有 login_required 事件（弹窗真出现）→ 事件文案优先于进行中反馈。"""
+    src = make_source(FakeClient())
+    src.last_event = {"event": "login_required"}
+    app = FakeApp(src)
+    app._login_busy = True
+    assert app._cred_ui(u_cred())[0] == "等待人工登录（助手已弹窗）"
+
+
+def test_click_renders_immediately_on_busy():
+    """pill 点击：busy 置位同帧 _render 一次（FakeApp 已借用 _cred_ui/点击链，
+    _render 为计数桩）；不渲染则进行中文案最长拖到下一事件才可见。"""
+    app = FakeApp(make_source(FakeClient()))
+    app._bailian_cred_click()
+    assert app._login_busy is True
+    assert app.rendered == 1
+    _drain_with_result(app)
+    assert app._login_busy is False
+
+
+def test_click_without_render_stub_is_safe():
+    """替身 app 无 _render（旧 FakeApp 形态）→ getattr 守卫静默跳过，不炸。"""
+    class NoRenderApp(FakeApp):
+        _render = None
+    app = NoRenderApp(make_source(FakeClient()))
+    app._bailian_cred_click()
+    assert app._login_busy is True
+    _drain_with_result(app)
+

@@ -1601,9 +1601,9 @@ def _interactive_login(st: dict, force: bool = False):
     force=True（reauth）：第 1 步「已 live 立即回包」与第 2 步「导航登录页后
     SPA 静默续登即回 live」两处短路都跳过——显式重登语义下必须真走登录页
     提升 + L2/L3（用户可能想换账号）；stop/shutdown、泊航跳过、origin 护栏、
-    submit-verify 机械全部照常。M31（2026-11-18）两处修订：error 轮先自愈
-    （1b 闸门，拿不到 need_login 实证不下瀑布不弹窗）；L2 inconclusive 预填
-    腿就地停 passport 已填页交人工（不再回 account 空页清空账密）。"""
+    submit-verify 机械全部照常。M31（2026-11-18）两处修订：error 轮先自愈一轮
+    （1b，live 即静默回包；M31b 起无否决权，其余形态照常下瀑布）；L2 inconclusive
+    预填腿就地停 passport 已填页交人工（不再回 account 空页清空账密）。"""
     window, stop = st["window"], st["stop"]
     try:
         tick = float(st.get("poll_interval", POLL_INTERVAL))
@@ -1612,12 +1612,12 @@ def _interactive_login(st: dict, force: bool = False):
         if rs == "live" and not force:
             st["state"] = "live"
             return "live", results, None
-        # 1b. M31 误报闸门（3.4 装机 11-18 15:28 实证：窗口泊 about:blank/页面
-        #     抖动时 evaluate_js 抛异常被误判 error → 会话没掉也弹 L3 窗）。
-        #     error 先自愈一轮（回 console 首页 + 重 fetch）：live=静默恢复；
-        #     拿不到 need_login 实证（仍 error/other 之外的非掉线形态）则判
-        #     页面环境病——直接回 error，不导航登录页、不 autofill、不弹窗。
-        #     真掉线自愈轮必回 need_login，照常下瀑布，不漏救。
+        # 1b. M31b 自愈轮（2026-11-18 晚 3.4+本机双实跑修正：v1.10.2 的 abort
+        #     是回归——真掉线冷启动/页面停摆时 fetch 连轮必然 error，need_login
+        #     干净信号根本来不及出现，拦截=橙态卡死+点 pill 没反应，弹窗这条
+        #     唯一生路被闸死）。现在闸门只有"加分权"没有"否决权"：error 先回
+        #     console 白捡一轮，live=误报静默恢复直接回包；其余（error/need_login
+        #     /other）一律照常下瀑布——弹窗兜底常开。reauth force 不经此闸。
         if rs == "error" and not force:
             log("INFO", "interactive: error round -> self-heal reload console once")
             st["page_poisoned"] = False
@@ -1629,11 +1629,6 @@ def _interactive_login(st: dict, force: bool = False):
             if rs == "live":
                 st["state"] = "live"
                 return "live", results, None
-            if rs != "need_login":
-                st["state"] = "error"
-                log("WARN", "interactive: self-heal still error (page flaky, "
-                            "no logout evidence) -> abort waterfall, no popup")
-                return "error", results, "page-flaky"
         # 2. 导航登录页（交互允许）+ SPA 静默续登等待；导航即标中毒
         log("INFO", f"interactive: {rs}{' (force)' if force else ''}"
                     f" -> navigate login page")
