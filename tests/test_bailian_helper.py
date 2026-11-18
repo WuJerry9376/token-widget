@@ -2208,3 +2208,146 @@ class TestNormalizeAutofillResult:
             {"submitted": True, "verify": "inconclusive"}
         assert bh._normalize_autofill_result({"submitted": False}) == \
             {"submitted": False, "verify": "prefail"}
+
+
+# ================================================================ M31（2026-11-18）
+# 3.4 装机 helper.log 11-16/11-18 实证两病：
+# ①页面抖动/泊 about:blank 的 error 轮误开登录瀑布——会话没掉也弹 L3；
+#   现 error 先自愈（回 console 重 fetch），无 need_login 实证即 abort 不弹窗。
+# ②L2 inconclusive（风控吞提交、表单值仍在）退回 account 空页——人工被迫重敲，
+#   CM 账密白填；现在就地停 passport 已填页 + 注入预填横幅。
+
+class TestM31FlakyGate:
+    """1b error 自愈闸门：假 _guarded_round 脚本轮序列驱动。"""
+
+    def _drive(self, monkeypatch, rounds, cmd="login_interactive", cid=91):
+        monkeypatch.setattr(bh, "_auth", _CredsAuth)
+        monkeypatch.setattr(bh, "_win32_show_topmost", lambda *a, **k: True)
+        monkeypatch.setattr(bh, "_win32_show_hide", lambda *a, **k: True)
+        seq = list(rounds)
+        autofill_calls = []
+        real = {"count": 0}
+
+        def fake_round(_st, budget):
+            rs = seq[min(real["count"], len(seq) - 1)]
+            real["count"] += 1
+            if rs == "live":
+                return "live", {"usage": {}}, None
+            return rs, None, "fetch-timeout"
+
+        monkeypatch.setattr(bh, "_guarded_round", fake_round)
+        monkeypatch.setattr(
+            bh, "autofill_login",
+            lambda *a, **k: autofill_calls.append(1)
+            or {"submitted": False, "verify": "prefail"})
+        w = NavWindow(bh.Api(), url=bh.CONSOLE_URL, envelope=_BAD_ENV)
+        st = _round_st(w, manual_budget=0.1, submit_verify_wait=0.0)
+        bh.handle_command(st, {"cmd": cmd, "id": cid})
+        return w, st, autofill_calls, real["count"]
+
+    def test_error_then_live_selfheals_without_waterfall(self, monkeypatch, capsys):
+        """error → 自愈轮 live：静默恢复——绝不导航登录页、无 autofill、无弹窗事件。"""
+        w, _st, af, rounds = self._drive(monkeypatch, ["error", "live"])
+        assert bh.LOGIN_URL not in w.load_urls
+        assert af == [] and rounds == 2                  # 仅 step1 + 自愈轮
+        out = _stdout_json(capsys)
+        assert not [o for o in out if o.get("event") == "login_required"]
+        assert out[-1]["id"] == 91 and out[-1]["state"] == "live" and out[-1]["ok"]
+
+    def test_error_twice_aborts_without_popup(self, monkeypatch, capsys):
+        """error → 自愈仍 error：页面环境病——abort，不下瀑布不弹窗。"""
+        w, st, af, rounds = self._drive(monkeypatch, ["error", "error"])
+        assert bh.LOGIN_URL not in w.load_urls
+        assert w.load_urls[0] == bh.CONSOLE_URL          # 自愈回 console 一次
+        assert af == [] and rounds == 2
+        assert st["state"] == "error"
+        out = _stdout_json(capsys)
+        assert not [o for o in out if o.get("event") == "login_required"]
+        assert out[-1]["id"] == 91 and out[-1]["state"] == "error"
+        assert out[-1]["error"] == "HELPER_ERROR"
+
+    def test_error_then_need_login_still_falls(self, monkeypatch, capsys):
+        """error → 自愈轮 need_login：真掉线不漏救——照常下 L2/L3 瀑布。"""
+        w, _st, af, rounds = self._drive(monkeypatch, ["error", "need_login"])
+        assert bh.LOGIN_URL in w.load_urls               # step2 导航发生
+        assert af != []                                  # L2 被调用
+        out = _stdout_json(capsys)
+        assert {"event": "login_required"} in out        # 走到 L3
+        assert out[-1]["id"] == 91
+
+    def test_reauth_force_bypasses_gate(self, monkeypatch, capsys):
+        """force（reauth）：error 短路语义不变——不经 1b 直接下瀑布。"""
+        w, _st, af, rounds = self._drive(monkeypatch, ["error"], cmd="reauth", cid=92)
+        assert bh.LOGIN_URL in w.load_urls and af != []
+        assert rounds >= 2                               # step1 + step2 轮（闸门轮不存在）
+        capsys.readouterr()
+
+
+class TestM31PrefillStay:
+    """L2 inconclusive 预填腿：值在页上就不再回 account 清空。"""
+
+    def _drive(self, monkeypatch, verify):
+        monkeypatch.setattr(bh, "_auth", _CredsAuth)
+        monkeypatch.setattr(bh, "_win32_show_topmost", lambda *a, **k: True)
+        monkeypatch.setattr(bh, "_win32_show_hide", lambda *a, **k: True)
+        monkeypatch.setattr(bh, "autofill_login",
+                            lambda *a, **k: {"submitted": True, "verify": verify})
+        monkeypatch.setattr(bh, "_l2_fast_grace", lambda _st: "parked")
+        hints = []
+        monkeypatch.setattr(bh, "_show_prefill_hint",
+                            lambda _w: hints.append(1))
+        w = NavWindow(bh.Api(), url=_PWDS_PAGE, envelope=_BAD_ENV)
+        st = _round_st(w, manual_budget=0.1, submit_verify_wait=0.0)
+        bh.handle_command(st, {"cmd": "login_interactive", "id": 93})
+        return w, hints
+
+    def _last_pwd_idx(self, w):
+        return max(i for i, u in enumerate(w.load_urls) if u == bh.PWD_LOGIN_URL)
+
+    def test_inconclusive_stays_on_filled_passport_page(self, monkeypatch, capsys):
+        """inconclusive + 泊 passport：不回 account、横幅注入一次、L3 照常弹窗。"""
+        w, hints = self._drive(monkeypatch, "inconclusive")
+        assert bh.LOGIN_URL not in w.load_urls[self._last_pwd_idx(w) + 1:]
+        assert hints == [1]
+        assert {"event": "login_required"} in _stdout_json(capsys)
+
+    def test_prefail_still_bounces_to_account(self, monkeypatch, capsys):
+        """prefail（值没填上）：旧行为保持——回 account 完整表单，无横幅。"""
+        w, hints = self._drive(monkeypatch, "prefail")
+        assert bh.LOGIN_URL in w.load_urls[self._last_pwd_idx(w) + 1:]
+        assert hints == []
+        capsys.readouterr()
+
+    def test_err_wrong_password_bounces_without_hint(self, monkeypatch, capsys):
+        """err（可见报错，账密可疑）：同样回 account 交人工修正，不预填。"""
+        w, hints = self._drive(monkeypatch, "err")
+        assert bh.LOGIN_URL in w.load_urls[self._last_pwd_idx(w) + 1:]
+        assert hints == []
+        capsys.readouterr()
+
+
+class TestM31PrefillHintJs:
+    def test_hint_injected_once_is_readonly_and_credential_free(self):
+        class Rec:
+            def __init__(self):
+                self.scripts = []
+
+            def evaluate_js(self, s):
+                self.scripts.append(s)
+                return "OK"
+
+        w = Rec()
+        bh._show_prefill_hint(w)
+        assert len(w.scripts) == 1
+        s = w.scripts[0]
+        assert "tw-login-hint" in s and json.dumps(bh.LOGIN_URL) in s
+        assert ".click()" not in s and "fetch(" not in s      # 只读横幅
+        assert "password" not in s.lower() or "fm-login" not in s
+
+    def test_hint_bridge_raise_is_swallowed(self):
+        class Boom:
+            def evaluate_js(self, s):
+                raise RuntimeError("bridge dead")
+
+        bh._show_prefill_hint(Boom())                         # 不得外抛
+

@@ -144,6 +144,7 @@ L2_FAST_GRACE_SECONDS = 10.0
 L2_FAST_GRACE_PROBE_INTERVAL = 5.0
 GOTO_TIMEOUT = 5.0           # load_url 单次调用护栏（UI Invoke 可能卡死）
 POPUP_STEP_TIMEOUT = 3.0     # L3 弹窗脉冲单步（restore/show/on_top）护栏
+PREFILL_HINT_TIMEOUT = 3.0   # M31 预填横幅 evaluate_js 护栏（弹窗时限不被横幅拖住）
 #: L3 人工等待期间的窗口标题提示（关闭≠成功，见 _notify_login_window_closed）
 MANUAL_LOGIN_TITLE = "阿里云登录窗口 — 登录成功后会自动隐藏，请不要关闭！"
 
@@ -839,6 +840,50 @@ def load_login_creds():
     except Exception:                                   # noqa: BLE001
         log("WARN", "load_bailian_login failed")
         return None
+
+
+# ------------------------------------------------- L3 预填横幅（M31，2026-11-18）
+#
+# 风控实证（3.4 装机 helper.log 11-16/11-18）：合成 submit 被静默吞时表单值仍在
+# （inputs_cleared=false），但旧版 L3 前退回 account 空表单页——用户只能重敲
+# 账密，CM 凭据在人工环节零价值。现在：inconclusive 且仍泊 passport 账密页
+# → 就地弹窗交人工（值已填好，用户只需完成验证并点击提交），并注入只读横幅
+# 说明 + 「改用扫码/短信」逃生链（点击即导航回 LOGIN_URL 完整登录页）。
+
+_PREFILL_HINT_JS = """
+(() => { try {
+  if (document.getElementById('tw-login-hint')) return 'OK';
+  const d = document.createElement('div');
+  d.id = 'tw-login-hint';
+  d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+    'background:#FBF3DF;color:#413928;padding:8px 12px;font:13px/1.6 sans-serif;' +
+    'text-align:center;border-bottom:1px solid #D9C79E';
+  d.textContent = %s;
+  const a = document.createElement('a');
+  a.href = %s;
+  a.textContent = '改用扫码 / 短信登录';
+  a.style.cssText = 'color:#D9782E;margin-left:8px';
+  d.appendChild(a);
+  (document.body || document.documentElement).appendChild(d);
+  return 'OK';
+} catch (e) { return 'ERR'; } })()""" % (
+    json.dumps("账号密码已自动填好 — 在页面里完成验证并点击登录即可。 "),
+    json.dumps(LOGIN_URL))
+
+
+def _show_prefill_hint(window) -> None:
+    """best-effort 注入预填横幅：走 _call_with_timeout 护栏——evaluate_js 在页面
+    停摆时最长可等 ready 20s，弹窗时限不能被一条横幅拖住；超时/异常只记日志，
+    绝不动瀑布主链。"""
+    box: dict = {}
+
+    def run():
+        box["r"] = window.evaluate_js(_PREFILL_HINT_JS)
+
+    if not _call_with_timeout(run, PREFILL_HINT_TIMEOUT, label="prefill_hint"):
+        return
+    if box.get("r") != "OK":
+        log("INFO", "prefill hint: injected, non-OK result")
 
 
 def store_login_creds(username, password) -> dict:
@@ -1556,7 +1601,9 @@ def _interactive_login(st: dict, force: bool = False):
     force=True（reauth）：第 1 步「已 live 立即回包」与第 2 步「导航登录页后
     SPA 静默续登即回 live」两处短路都跳过——显式重登语义下必须真走登录页
     提升 + L2/L3（用户可能想换账号）；stop/shutdown、泊航跳过、origin 护栏、
-    submit-verify 机械全部照常。"""
+    submit-verify 机械全部照常。M31（2026-11-18）两处修订：error 轮先自愈
+    （1b 闸门，拿不到 need_login 实证不下瀑布不弹窗）；L2 inconclusive 预填
+    腿就地停 passport 已填页交人工（不再回 account 空页清空账密）。"""
     window, stop = st["window"], st["stop"]
     try:
         tick = float(st.get("poll_interval", POLL_INTERVAL))
@@ -1565,6 +1612,28 @@ def _interactive_login(st: dict, force: bool = False):
         if rs == "live" and not force:
             st["state"] = "live"
             return "live", results, None
+        # 1b. M31 误报闸门（3.4 装机 11-18 15:28 实证：窗口泊 about:blank/页面
+        #     抖动时 evaluate_js 抛异常被误判 error → 会话没掉也弹 L3 窗）。
+        #     error 先自愈一轮（回 console 首页 + 重 fetch）：live=静默恢复；
+        #     拿不到 need_login 实证（仍 error/other 之外的非掉线形态）则判
+        #     页面环境病——直接回 error，不导航登录页、不 autofill、不弹窗。
+        #     真掉线自愈轮必回 need_login，照常下瀑布，不漏救。
+        if rs == "error" and not force:
+            log("INFO", "interactive: error round -> self-heal reload console once")
+            st["page_poisoned"] = False
+            if _goto(window, CONSOLE_URL):
+                _wait_page_ready(window, RELOAD_SETTLE_BUDGET)
+            rs, res2, _d = _guarded_round(st, POLL_DEADLINE)
+            if res2 is not None:
+                results = res2
+            if rs == "live":
+                st["state"] = "live"
+                return "live", results, None
+            if rs != "need_login":
+                st["state"] = "error"
+                log("WARN", "interactive: self-heal still error (page flaky, "
+                            "no logout evidence) -> abort waterfall, no popup")
+                return "error", results, "page-flaky"
         # 2. 导航登录页（交互允许）+ SPA 静默续登等待；导航即标中毒
         log("INFO", f"interactive: {rs}{' (force)' if force else ''}"
                     f" -> navigate login page")
@@ -1622,11 +1691,18 @@ def _interactive_login(st: dict, force: bool = False):
                     return _finish_live(st, results, "autofill")
                 if rs == "error":
                     return "error", results, "cancelled"
-            # L2 未成功（快速升级，或提交后 AUTOFILL_BUDGET 内未 live）：若仍泊
-            # 在 passport 顶层页，回 account 页（扫码/短信/RAM 全形态）再进 L3
+            # L2 未成功（快速升级，或提交后 AUTOFILL_BUDGET 内未 live）：
+            # M31 预填——inconclusive=风控吞提交但表单值仍在页上，且仍泊
+            # passport 账密顶层页 → 就地弹窗交人工补验证（保住 CM 已填账密，
+            # 用户不必重敲）；prefail/err（值不可信或从未填上）保持旧腿：
+            # 回 account 完整登录页（扫码/短信/RAM 全形态）再进 L3。
             if _url_host(_url_for_log(window)) == PWD_LOGIN_HOST:
-                _goto(window, LOGIN_URL)
-                _wait_page_ready(window, RELOAD_SETTLE_BUDGET)
+                if l2["submitted"] and l2["verify"] == "inconclusive":
+                    log("INFO", "L3 prefill: stay on filled passport entrance")
+                    _show_prefill_hint(window)
+                else:
+                    _goto(window, LOGIN_URL)
+                    _wait_page_ready(window, RELOAD_SETTLE_BUDGET)
         else:
             # 单次尝试门控保留（页面不可执行 JS 时填充必败），但补 skip-reason 日志
             log("INFO", "L2 autofill skipped: " +
