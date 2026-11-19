@@ -52,14 +52,20 @@ def test_should_auto_renew_all_true_fires():
     assert ui_mod.should_auto_renew(**_flags()) is True
 
 
+def test_should_auto_renew_no_credential_fires_v1111():
+    """v1.11.1：NO_CREDENTIAL（helper 抖动降级 + 本地无 Cookie）在 CM 有账密
+    + helper 活着时同样放行——3.4 11-19 实证旧版只认 LOGIN_EXPIRED 闸门永闭。"""
+    assert ui_mod.should_auto_renew(**_flags(error_code="NO_CREDENTIAL")) is True
+
+
 @pytest.mark.parametrize("key,val", [
-    ("error_code", "NO_CREDENTIAL"),      # 首登态：不自动弹
-    ("error_code", None),                 # 成功轮
-    ("mode", "legacy"),                   # 粘贴 Cookie 路径，无 helper
-    ("helper_running", False),            # 助手没起来 → 自动弹也没用
-    ("has_creds", False),                 # CM 无账密 → 无法静默续期
-    ("login_busy", True),                 # 单飞：在途不重复起
-    ("elapsed", COOLDOWN - 1.0),          # 冷却未满
+    ("error_code", "NETWORK"),               # 网络态：不自动弹
+    ("error_code", None),                    # 成功轮
+    ("mode", "legacy"),                      # 粘贴 Cookie 路径，无 helper
+    ("helper_running", False),               # 助手没起来 → 自动弹也没用
+    ("has_creds", False),                    # CM 无账密（含首登 NO_CREDENTIAL 态）
+    ("login_busy", True),                    # 单飞：在途不重复起
+    ("elapsed", COOLDOWN - 1.0),             # 冷却未满
 ])
 def test_should_auto_renew_blocked_each_condition(key, val):
     assert ui_mod.should_auto_renew(**_flags(**{key: val})) is False
@@ -155,12 +161,20 @@ def test_hook_blocked_each_source_condition(over, clicks):
     assert app.clicks == clicks
 
 
-@pytest.mark.parametrize("code", ["NO_CREDENTIAL", None])
+@pytest.mark.parametrize("code", [None])
 def test_hook_blocked_by_error_code(code):
     app = ClickCountApp(FakeSource())
     app.usages = [_usage(code is None, code)]
     app._maybe_auto_renew()
     assert app.clicks == 0
+
+
+def test_hook_fires_on_no_credential_v1111():
+    """接线级：NO_CREDENTIAL 轮（legacy 无 Cookie 形态）全条件真 → 恰一次点击。"""
+    app = ClickCountApp(FakeSource())
+    app.usages = [_usage(False, "NO_CREDENTIAL")]
+    app._maybe_auto_renew()
+    assert app.clicks == 1
 
 
 def test_hook_blocked_cooldown_fresh():

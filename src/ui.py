@@ -70,14 +70,17 @@
 - 失败降级：有最后成功值 → 灰显 +「旧数据」标记；LOGIN_EXPIRED/NO_CREDENTIAL/
   KEY_INVALID/NO_SUBSCRIPTION → 橙色凭据档（bailian 走 Cookie 面板、OpenAI/Go 走密钥面板）；
   RATE_LIMITED/NETWORK 等走灰 stale 档；绝不渲染空值假象。凭据（Cookie/key）永不进入 UI。
-- M27 自动续期（auto-renewal）：一轮 poll 收尾 bailian error_code==LOGIN_EXPIRED（helper
-  报 need_login，会话掉了——非 NO_CREDENTIAL 首登态）且 mode!=legacy 且 helper_running 且
+- M27 自动续期（auto-renewal）：一轮 poll 收尾 bailian error_code ∈ {LOGIN_EXPIRED,
+  NO_CREDENTIAL}（v1.11.1 扩：helper 抖动轮报 error → 降级 legacy，本地无 Cookie 时
+  正是报 NO_CREDENTIAL——3.4 11-19 实证旧版只认 LOGIN_EXPIRED 把闸门永久关死；首登
+  空 CM 场景由 has_saved_creds=False 兜住不弹）且 mode!=legacy 且 helper_running 且
   CM 有账密（source.has_saved_creds，读异常按无凭据）且冷却 AUTO_RENEW_COOLDOWN(600s) 已过
   且非 _login_busy → 自动调用与点击 pill 完全同路的 _bailian_cred_click（复用 M25 daemon
-  线程机器，零新线程：login_interactive → helper L2 静默自动填充续期；L3 仅在验证码拦路时
-  弹窗，届时既有 event_text 流程显示「等待人工登录（助手已弹窗）」，pill 文案不变）。判定
+  线程机器，零新线程：login_interactive → helper L2e 无人值守自动登录（M32）；L3 仅在
+  人机验证拦路时弹窗，届时既有 event_text 流程显示「等待人工登录（助手已弹窗）」，
+  pill 文案不变）。判定
   单一真相源=模块级纯函数 should_auto_renew；_maybe_auto_renew 挂在 _drain 结果落地分支
-  （每 poll 轮一次，非每 250ms tick）。冷却 + 单飞 + 仅 LOGIN_EXPIRED ⇒ 每 10min 至多一次，
+  （每 poll 轮一次，非每 250ms tick）。冷却 + 单飞 ⇒ 每 10min 至多一次，
   交互失败不重武装（时间戳已消费）。凭据值仍永不进入 UI。
 - 数据契约只消费 src.sources.base.Usage/Window，不感知供应商协议。
 """
@@ -175,12 +178,14 @@ def _unpack_login_item(item) -> tuple[str, object]:
 # ---------- 自动续期（auto-renewal）：会话掉线自动走交互登录（复用 M25 机器，无新线程） ----------
 #
 # 触发面（全部纯读，主线程零阻塞 I/O，CM CredRead 快同步 ~ms 已在决策入口兜异常）：
-# 一轮 poll 收尾 bailian error_code==LOGIN_EXPIRED（helper 报 need_login，会话掉了；
-# NO_CREDENTIAL 是「无账密」首登态，不自动弹，交人工点击）且 mode!=legacy 且 helper 活着
+# 一轮 poll 收尾 bailian error_code ∈ {LOGIN_EXPIRED, NO_CREDENTIAL}（v1.11.1 起
+# NO_CREDENTIAL 也放行：helper 页面抖动时静默轮回 HELPER_ERROR → 降级 legacy → 本地
+# Cookie 不存在/过期即报 NO_CREDENTIAL，这正是无人值守要救的常态；「首登不自动弹」
+# 语义由 has_creds=False 独立兜住）且 mode!=legacy 且 helper 活着
 # 且 CM 存有账密 且 距上次自动尝试 ≥ 冷却 且 无在途登录。命中即调用与点击 pill 完全同路
-# 的 _bailian_cred_click（daemon 线程 → login_interactive → helper L2 静默自动填充续期；
+# 的 _bailian_cred_click（daemon 线程 → login_interactive → helper L2e 无人值守自动登录；
 # L3 弹窗仅在验证码拦路时出现，届时既有 event_text 流程显示「等待人工登录（助手已弹窗）」）。
-# 冷却 + 单飞 + 仅 LOGIN_EXPIRED ⇒ 每 10min 至多一次交互；交互失败的响应不再重武装
+# 冷却 + 单飞 ⇒ 每 10min 至多一次交互；交互失败的响应不再重武装
 # （busy 已释放、时间戳已消费）。
 AUTO_RENEW_COOLDOWN = 600.0    # 两次自动续期尝试的最小间隔（秒）
 
@@ -200,9 +205,12 @@ def should_auto_renew(error_code: str | None, mode: str, helper_running: bool,
                       cooldown: float = AUTO_RENEW_COOLDOWN) -> bool:
     """自动续期判定的单一真相源（纯函数：所有取数在调用方完成后传入，无 I/O、无副作用）。
 
-    全部成立才放行：LOGIN_EXPIRED（非 NO_CREDENTIAL）· 非 legacy · helper 活着 ·
+    全部成立才放行：error_code ∈ {LOGIN_EXPIRED, NO_CREDENTIAL}（v1.11.1：
+    NO_CREDENTIAL=helper 抖动降级 + 本地无 Cookie 的常见掉线形态，旧版只认
+    LOGIN_EXPIRED 会永久关闸；首登无凭据场景由 has_creds=False 挡住）·
+    非 legacy · helper 活着 ·
     CM 有账密 · 无在途登录 · 冷却已过。任一不满足 → False（不自动弹登录）。"""
-    return (error_code == "LOGIN_EXPIRED"
+    return (error_code in ("LOGIN_EXPIRED", "NO_CREDENTIAL")
             and mode != "legacy"
             and bool(helper_running)
             and bool(has_creds)
@@ -1395,7 +1403,8 @@ class NoteApp:
         helper/busy 并起 daemon 线程）。CM 账密存在性经 source.has_saved_creds 读
         （属性已兜异常→False）；任何异常都不得打断 250ms 事件泵（整体 try 兜）。
 
-        零-I/O 前置闸：正常登录态 error_code≠LOGIN_EXPIRED（或冷却未满/在途）即返回，
+        零-I/O 前置闸：正常登录态 error_code ∉ {LOGIN_EXPIRED, NO_CREDENTIAL}（或冷却
+        未满/在途）即返回，
         不去读 source.mode（配置文件）/helper_running（proc.poll）/CM——把带 I/O 的
         取数与最终判定都推到「确有一个过期轮次且冷却已过」之后。should_auto_renew
         仍是权威结论（前置闸只是省 I/O 的同源子集）。"""
@@ -1403,7 +1412,7 @@ class NoteApp:
             return
         try:
             code = _bailian_error_code(self.usages)     # 纯读缓存：正常轮次到此即否决
-            if code != "LOGIN_EXPIRED" or self._login_busy:
+            if code not in ("LOGIN_EXPIRED", "NO_CREDENTIAL") or self._login_busy:
                 return
             src = self._bailian_source()
             if src is None:
