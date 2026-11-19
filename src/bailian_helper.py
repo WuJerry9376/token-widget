@@ -1120,6 +1120,86 @@ def cdp_l2e_challenge_now(st: dict) -> bool:
         return False
 
 
+# ------------------------------------------------- M33 会话快照桥（cookie 持久化）
+#
+# 3.4 11-19 实测终局缺口：L2e 已 rs=live 登录成功，但 45s 看门狗 kill 连坐杀掉
+# WebView2 浏览器进程时 cookie 尚未刷盘（旁证：stdout Errno 22 + 13:58 新 worker
+# 又 need_login）——登录在赢、持久化在输，每次重启整条瀑布白跑。
+# 桥：登录态发生「转入 live」时经 CDP Network.getCookies 抓会话快照 →
+# auth.save_bailian_cookie 存 DPAPI（M3 起就为「续期流写回」预留的存储位）；
+# 静默轮 need_login 时先 Network.setCookies 注回再 reload——新进程免登录秒回绿，
+# legacy 传输（urllib+同一份 DPAPI）同步复活。
+# 明文纪律：快照值只进 DPAPI 文件与 CDP 参数；日志只报字段数。
+
+_COOKIE_SNAPSHOT_URLS = ["https://bailian.console.aliyun.com/",
+                         "https://console.aliyun.com/",
+                         "https://www.aliyun.com/"]
+_COOKIE_RESTORE_MAX = 5      # 每进程注回上限（防 need_login 风暴反复注）
+
+
+def cdp_snapshot_cookies(st: dict) -> None:
+    """转入 live 时把 .aliyun.com 会话快照写入 DPAPI（尽力而为，绝不影响主链）。
+    M33b：按需自探（同 restore，稳态首轮 live 也可能尚未走过交互/注回路径）。"""
+    if not _cdp_available(st):
+        return
+    ch = st.get("cdp_channel")
+    if ch is None or _auth is None or not hasattr(_auth, "save_bailian_cookie"):
+        return
+    try:
+        r = ch.call("Network.getCookies", {"urls": _COOKIE_SNAPSHOT_URLS})
+        seen: set = set()
+        pairs: list = []
+        for c in r.get("cookies") or []:
+            name = c.get("name") or ""
+            if name and name not in seen:
+                seen.add(name)
+                pairs.append(f"{name}={c.get('value') or ''}")
+        if len(pairs) < 2:
+            log("WARN", f"cookie snapshot skipped ({len(pairs)} fields)")
+            return
+        _auth.save_bailian_cookie("; ".join(pairs))
+        log("INFO", f"cookie snapshot saved ({len(pairs)} fields)")
+    except Exception as e:                              # noqa: BLE001
+        log("INFO", f"cookie snapshot skipped: {type(e).__name__}")
+
+
+def cdp_restore_cookies(st: dict) -> bool:
+    """need_login 时把本地快照注回 webview（reload 试 SPA 续登之前执行）。
+    无快照/无车道/超注回上限/CDP 失败 → False（瀑布照旧走 L2e，不劣化）。
+    M33b：按需自探——纯 poll 进程（未走交互路）也必须有车道可用，
+    否则快照注回永远静默（m33_e2e 阶段2 实测抓出的接线缺陷）。"""
+    if st.get("cookie_restore_n", 0) >= _COOKIE_RESTORE_MAX:
+        return False
+    if not _cdp_available(st):
+        return False
+    ch = st.get("cdp_channel")
+    if ch is None or _auth is None or not hasattr(_auth, "load_bailian_cookie"):
+        return False
+    try:
+        raw = _auth.load_bailian_cookie()
+    except Exception:                                   # noqa: BLE001
+        return False
+    cookies: list = []
+    for part in str(raw or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k:
+            cookies.append({"name": k, "value": v,
+                            "url": _COOKIE_SNAPSHOT_URLS[0],
+                            "domain": ".aliyun.com", "path": "/",
+                            "secure": True})
+    if len(cookies) < 2:
+        return False
+    st["cookie_restore_n"] = st.get("cookie_restore_n", 0) + 1
+    try:
+        ch.call("Network.setCookies", {"cookies": cookies})
+        log("INFO", f"cookie restore injected ({len(cookies)} fields, "
+                    f"try #{st['cookie_restore_n']})")
+        return True
+    except Exception as e:                              # noqa: BLE001
+        log("INFO", f"cookie restore failed: {type(e).__name__}")
+        return False
+
+
 def store_login_creds(username, password) -> dict:
     """save_creds 命令处理（协议 §6.3）：明文只走 stdin 管道。"""
     if _auth is None or not hasattr(_auth, "save_bailian_login"):
@@ -1721,6 +1801,7 @@ def _await_live(st: dict, budget: float, recheck: float | None = None):
 def _finish_live(st: dict, results, method: str):
     """交互路径成功出口：先落稳定页再事件/响应（§6 修订）。"""
     st["state"] = "live"
+    cdp_snapshot_cookies(st)     # M33：登录成功即持久化会话快照（profile 被杀兜底）
     _login_done(st, method)
     return "live", results, None
 
@@ -1798,6 +1879,8 @@ def _silent_poll(st: dict):
         _ensure_console_origin(window, st)
     rs, results, detail = _guarded_round(st, remaining())
     if rs == "live":
+        if st.get("state") != "live":
+            cdp_snapshot_cookies(st)      # M33：SPA 静默续登也算态转入（票据轮换）
         st["state"] = "live"
         return "live", results, None
     if rs == "error":
@@ -1807,6 +1890,7 @@ def _silent_poll(st: dict):
     # need_login / other：CM 有凭据 → 允许重载 console 首页一次试 SPA 静默续登
     creds = load_login_creds()
     if creds is not None and not reloaded and remaining() > 2.0:
+        cdp_restore_cookies(st)           # M33：先注回本地快照再 reload
         log("INFO", "need_login + CM creds -> reload console once for SPA renew")
         reloaded = True
         _goto(window, CONSOLE_URL)

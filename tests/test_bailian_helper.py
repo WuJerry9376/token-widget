@@ -2550,3 +2550,134 @@ class TestM32WaterfallWiring:
         assert bh.PWD_LOGIN_URL not in w.load_urls
         assert {"event": "login_required"} in _stdout_json(capsys)
 
+
+
+# ================================================================ M33 会话快照桥
+# 3.4 11-19 实测：L2e 登录成功后 45s 看门狗 kill 连坐 WebView2 cookie 未刷盘
+# （stdout Errno22 + 新 worker 又 need_login）——登录在赢持久化在输。桥=转入
+# live 时 Network.getCookies 快照进 DPAPI；need_login 时先 setCookies 注回。
+
+class _SnapAuth:
+    def __init__(self, cookie="login_aliyunid_ticket=T; login_aliyunid_csrf=C",
+                 load_raises=False):
+        self.saved = []
+        self._cookie = cookie
+        self._raises = load_raises
+
+    def save_bailian_cookie(self, text, path=None):
+        self.saved.append(text)
+
+    def load_bailian_cookie(self):
+        if self._raises:
+            raise OSError("missing")
+        return self._cookie
+
+
+class TestM33CookieBridge:
+    def test_snapshot_on_finish_live_dedup_and_no_plaintext(self, monkeypatch, capsys):
+        a = _SnapAuth()
+        monkeypatch.setattr(bh, "_auth", a)
+        ch = _FakeChannel(ev_script={"1+1": "2"},
+                          call_script={"Network.getCookies": {"cookies": [
+            {"name": "login_aliyunid_ticket", "value": "T"},
+            {"name": "login_aliyunid_csrf", "value": "C"},
+            {"name": "dup", "value": "x"}, {"name": "dup", "value": "y"},
+            {"name": "", "value": "z"}]}})
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window: ch))
+        w = NavWindow(bh.Api(), url=bh.CONSOLE_URL, envelope=_OK_ENV)
+        st = _round_st(w)                        # M33b：不带 cdp_* 键，按需自探
+        out = bh._finish_live(st, {"usage": {}}, "cdp-embed")
+        assert out[0] == "live" and st["state"] == "live"
+        assert a.saved == ["login_aliyunid_ticket=T; login_aliyunid_csrf=C; dup=x"]
+        err = capsys.readouterr().err
+        assert "cookie snapshot saved (3 fields)" in err
+        assert "T\"" not in err and "=T'" not in err and "s3cr3t" not in err
+        assert "login_aliyunid_ticket=T" not in err   # 完整明文对绝不入日志
+
+    def test_snapshot_on_demand_probe_no_lane_keys(self, monkeypatch):
+        """M33b 核心回归：纯 poll 进程 st 无 cdp_ok/cdp_channel 键也必须成桥。"""
+        a = _SnapAuth()
+        monkeypatch.setattr(bh, "_auth", a)
+        ch = _FakeChannel(ev_script={"1+1": "2"},
+                          call_script={"Network.getCookies": {"cookies": [
+            {"name": "t1", "value": "A"}, {"name": "t2", "value": "B"}]}})
+        monkeypatch.setattr(bh._CdpChannel, "from_window",
+                            classmethod(lambda cls, window: ch))
+        st = {"window": object(), "stop": threading.Event()}
+        bh.cdp_snapshot_cookies(st)
+        assert a.saved == ["t1=A; t2=B"]
+        assert st["cdp_ok"] is True              # 探测结果常驻
+
+    def test_snapshot_skipped_without_lane_or_thin_cookies(self, monkeypatch, capsys):
+        a = _SnapAuth()
+        monkeypatch.setattr(bh, "_auth", a)
+        st = {"cdp_ok": False, "cdp_channel": _FakeChannel(),
+              "stop": threading.Event()}
+        bh.cdp_snapshot_cookies(st)
+        assert a.saved == []
+        ch = _FakeChannel(call_script={"Network.getCookies": {"cookies": [
+            {"name": "only", "value": "1"}]}})                      # <2 字段跳过
+        st2 = {"cdp_ok": True, "cdp_channel": ch, "stop": threading.Event()}
+        bh.cdp_snapshot_cookies(st2)
+        assert a.saved == []
+        assert "cookie snapshot skipped (1 fields)" in capsys.readouterr().err
+
+    def test_restore_parses_and_flags_try(self, monkeypatch, capsys):
+        a = _SnapAuth()
+        monkeypatch.setattr(bh, "_auth", a)
+        ch = _FakeChannel()
+        st = {"cdp_ok": True, "cdp_channel": ch, "stop": threading.Event()}
+        assert bh.cdp_restore_cookies(st) is True
+        method, params = ch.calls[0]
+        assert method == "Network.setCookies"
+        names = {c["name"] for c in params["cookies"]}
+        assert names == {"login_aliyunid_ticket", "login_aliyunid_csrf"}
+        assert all(c["domain"] == ".aliyun.com" and c["path"] == "/"
+                   for c in params["cookies"])
+        err = capsys.readouterr().err
+        assert "cookie restore injected (2 fields, try #1)" in err
+        assert "=T" not in err
+        assert st["cookie_restore_n"] == 1
+
+    def test_restore_gates(self, monkeypatch):
+        monkeypatch.setattr(bh, "_auth", _SnapAuth(load_raises=True))
+        st = {"cdp_ok": True, "cdp_channel": _FakeChannel(),
+              "stop": threading.Event()}
+        assert bh.cdp_restore_cookies(st) is False          # 无快照文件
+        monkeypatch.setattr(bh, "_auth", _SnapAuth())
+        st2 = {"cdp_ok": True, "cdp_channel": _FakeChannel(),
+               "stop": threading.Event(), "cookie_restore_n": 5}
+        assert bh.cdp_restore_cookies(st2) is False         # 注回上限
+        st3 = {"cdp_ok": False, "cdp_channel": None,
+               "stop": threading.Event()}
+        assert bh.cdp_restore_cookies(st3) is False         # 无车道
+        monkeypatch.setattr(bh, "_auth", _SnapAuth(cookie="lonely=1"))
+        st4 = {"cdp_ok": True, "cdp_channel": _FakeChannel(),
+               "stop": threading.Event()}
+        assert bh.cdp_restore_cookies(st4) is False         # 残档 <2 字段
+
+    def test_silent_poll_live_transition_snapshots_once(self, monkeypatch):
+        monkeypatch.setattr(bh, "_auth", _CredsAuth)
+        snaps = []
+        monkeypatch.setattr(bh, "cdp_snapshot_cookies", lambda st: snaps.append(1))
+        w = NavWindow(bh.Api(), url=bh.CONSOLE_URL, envelope=_OK_ENV)
+        st = _round_st(w)
+        assert bh._silent_poll(st)[0] == "live"
+        assert len(snaps) == 1
+        assert bh._silent_poll(st)[0] == "live"             # 稳态轮不再快照
+        assert len(snaps) == 1
+
+    def test_silent_poll_need_login_restores_before_reload(self, monkeypatch):
+        monkeypatch.setattr(bh, "_auth", _CredsAuth)
+        seq = ["need_login", "live"]
+        monkeypatch.setattr(bh, "_guarded_round",
+                            lambda _st, budget: (seq.pop(0), None, None))
+        calls = []
+        monkeypatch.setattr(bh, "cdp_restore_cookies",
+                            lambda st: calls.append(1) or True)
+        w = NavWindow(bh.Api(), url=bh.CONSOLE_URL, envelope=_BAD_ENV)
+        st = _round_st(w)
+        assert bh._silent_poll(st)[0] == "live"
+        assert calls == [1]                                 # 先注回再 reload
+
